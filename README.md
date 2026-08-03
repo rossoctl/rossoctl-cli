@@ -37,6 +37,61 @@ rossoctl cortex start
 # (under construction)
 ```
 
+## Running a command behind an AuthBridge pipeline
+
+```sh
+# `--config` is required and takes a local YAML file or a URL serving YAML (a
+# remote config is fetched to a temp file, which is removed on exit). Everything
+# after `--` is passed through to the command untouched, and rossoctl exits with
+# the command's exit status.
+rossoctl authbridge exec --config ./authbridge.yaml -- claude "explain this repo"
+rossoctl authbridge exec --config https://example.com/authbridge.yaml -- ./script.sh --verbose
+```
+
+What `authbridge exec` starts, driven by the config:
+
+| Config | What starts |
+| --- | --- |
+| `listener.roles` includes `forward` | forward proxy on `listener.forward_proxy_addr` (feeds traffic through the outbound pipeline) |
+| `tls_bridge.mode` not `disabled`/empty | TLS bridge, so the pipeline sees decrypted HTTPS instead of an opaque CONNECT tunnel |
+| `session.enabled` not `false` | session store, plus the session API on `listener.session_api_addr` when set |
+
+A listen address of port `0` is resolved to the port the kernel actually assigned,
+so an ephemeral proxy is still dialable by the hosted command.
+
+`--sessionServer` overrides the session API address when given explicitly
+(defaulting to `localhost:9094`, which leaves the config's own address alone):
+
+```sh
+# Serve the session API somewhere else, even if the config disabled sessions.
+rossoctl authbridge exec --sessionServer 127.0.0.1:9500 --config ./authbridge.yaml -- claude
+
+# Turn session tracking off entirely.
+rossoctl authbridge exec --sessionServer "" --config ./authbridge.yaml -- claude
+```
+
+The command's environment is pointed at whatever started: `HTTP_PROXY` for the
+forward proxy, plus `HTTPS_PROXY` and the CA trust variables
+(`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`) when the TLS
+bridge runs. Variables already set in your environment are left alone. Everything
+is shut down when the command exits or on SIGINT/SIGTERM.
+
+Authbridge's own log output goes to `--logfile` (default `/tmp/authbridge.log`)
+rather than stderr, so it does not interleave with the hosted command's output.
+The path is printed at startup; pass `--logfile ""` to log to stderr instead.
+
+Plugins are compiled in via one blank import per plugin, matching the authbridge
+binaries — including `context-guru`, which those binaries keep opt-in but which
+rossoctl links by default so the context-guru demos run without a special build.
+Drop any of them with its exclude tag:
+
+```sh
+go build -tags exclude_plugin_opa,exclude_plugin_contextguru
+```
+
+Note that `go run` reports its own exit status, not the command's, so it collapses
+any non-zero status to 1. Use a built binary when the exit code matters.
+
 ## Usage
 
 ```sh

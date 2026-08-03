@@ -235,7 +235,10 @@ func TestToolsImportDeploymentTypeDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not find command: %v", err)
 	}
-	f := cmd.Flags().Lookup("deployment-type")
+	// InheritedFlags, not Flags: see the note in the agents equivalent — Cobra
+	// only merges a parent's persistent flags into Flags() once the command runs,
+	// so Flags() would make this test depend on test ordering.
+	f := cmd.InheritedFlags().Lookup("deployment-type")
 	if f == nil {
 		t.Fatal("from-image does not inherit --deployment-type")
 	}

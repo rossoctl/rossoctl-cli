@@ -200,6 +200,11 @@ current when none exists.`,
 func init() {
 	cortexCmd := newGroup("cortex", "Manage cortexes")
 
+	// Hidden: the cortex commands are not part of the advertised CLI surface
+	// today. They still work when named explicitly — hiding only removes them
+	// from help listings and completion.
+	cortexCmd.Hidden = true
+
 	// Persistent so every cortex subcommand inherits it. --context is a
 	// root-level persistent flag inherited here; for cortex it selects an
 	// existing cortex-typed context instead of --cortex.

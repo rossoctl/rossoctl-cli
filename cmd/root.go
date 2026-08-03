@@ -8,6 +8,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -177,11 +178,24 @@ func attachVerboseLogger(cmd *cobra.Command, client rossoctlclient.Rossoctl) {
 
 // Execute runs the root command. It is the single entry point called from
 // main and is the only exported symbol in this package.
+//
+// Most failures print an "Error:" line and exit 1. A command that ran a child
+// process to completion instead reports the child's status via *exitCodeError:
+// that status becomes ours, and nothing is printed, since the child has already
+// said whatever it had to say on its own stderr.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+	err := rootCmd.Execute()
+	if err == nil {
+		return
 	}
+
+	var exitErr *exitCodeError
+	if errors.As(err, &exitErr) {
+		os.Exit(exitErr.code)
+	}
+
+	fmt.Fprintln(os.Stderr, "Error:", err)
+	os.Exit(1)
 }
 
 func init() {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,11 @@ import (
 // context config. XDG_CONFIG_HOME and ROSSOCORTEX_CONFIG_DIR are cleared so the
 // default paths resolve under the temp HOME rather than a developer's real
 // config dir.
+//
+// It also repoints `authbridge exec`'s --logfile default into that directory. The
+// registered default is the real /tmp/authbridge.log, and resetFlags restores
+// every flag to its default between runs, so without this every exec test would
+// append to a developer's actual logfile.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "rossoctl-cmd-test-home")
 	if err != nil {
@@ -25,6 +31,14 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("HOME", dir)
 	_ = os.Unsetenv("XDG_CONFIG_HOME")
 	_ = os.Unsetenv("ROSSOCORTEX_CONFIG_DIR")
+
+	// Retarget the --logfile default before any test runs. DefValue is what
+	// resetFlags restores to, so both it and the bound value must change.
+	if f := authbridgeExecCmd.Flags().Lookup("logfile"); f != nil {
+		f.DefValue = filepath.Join(dir, "authbridge.log")
+		_ = f.Value.Set(f.DefValue)
+	}
+
 	// Never spawn a real browser during the device-login tests, and don't
 	// actually sleep between token polls.
 	browserOpener = func(string) error { return nil }
@@ -98,6 +112,12 @@ var flagSliceDefaults = map[*pflag.Flag][]string{}
 // need SliceValue.Replace with the snapshotted default: their Set appends after
 // the first call, and neither Set("[]") nor Set(DefValue) round-trips. Every
 // flag's Changed bit is then cleared.
+//
+// A flag set also remembers where a "--" delimiter appeared, which
+// ArgsLenAtDash reports and `authbridge exec` relies on. That position is private
+// state whose only reset is FlagSet.Init, so Init is re-invoked with the set's
+// existing name and error-handling policy. Without this, a test that passes
+// "--" leaves the delimiter "set" for every later test.
 func resetFlags(cmd *cobra.Command) {
 	clear := func(f *pflag.Flag) {
 		if sv, isSlice := f.Value.(pflag.SliceValue); isSlice {
@@ -115,6 +135,9 @@ func resetFlags(cmd *cobra.Command) {
 	}
 	cmd.Flags().VisitAll(clear)
 	cmd.PersistentFlags().VisitAll(clear)
+	if fs := cmd.Flags(); fs.ArgsLenAtDash() != -1 {
+		fs.Init(fs.Name(), pflag.ContinueOnError)
+	}
 	for _, sub := range cmd.Commands() {
 		resetFlags(sub)
 	}
@@ -204,7 +227,7 @@ func TestUnimplementedCommandsPrintPlaceholder(t *testing.T) {
 // description, so we check that the standalone placeholder line was not
 // printed rather than that the substring is absent.
 func TestGroupsAreNotRunnable(t *testing.T) {
-	groups := []string{"agents", "config", "namespaces", "tools", "ui"}
+	groups := []string{"agents", "authbridge", "config", "namespaces", "tools", "ui"}
 	for _, g := range groups {
 		t.Run(g, func(t *testing.T) {
 			out, err := execute(t, g)

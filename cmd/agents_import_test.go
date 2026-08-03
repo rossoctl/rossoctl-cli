@@ -195,7 +195,12 @@ func TestAgentsImportDeploymentTypeDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not find command: %v", err)
 	}
-	f := cmd.Flags().Lookup("deployment-type")
+	// Look the flag up via InheritedFlags rather than Flags: Cobra only merges a
+	// parent's persistent flags into a subcommand's own set when that command is
+	// executed, so Flags() finds it only if some earlier test happened to run an
+	// `agents import` command. InheritedFlags resolves the parent chain directly,
+	// which keeps this test independent of ordering.
+	f := cmd.InheritedFlags().Lookup("deployment-type")
 	if f == nil {
 		t.Fatal("from-image does not inherit --deployment-type")
 	}
