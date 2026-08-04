@@ -33,9 +33,10 @@ import (
 
 // execArgs holds the `authbridge exec` flags.
 var execArgs struct {
-	config        string
-	logfile       string
-	sessionServer string
+	config              string
+	logfile             string
+	sessionServer       string
+	proxyContainerImage string
 }
 
 // defaultSessionServer is where the session API listens when --sessionServer is
@@ -143,6 +144,16 @@ forward proxy runs, and additionally HTTPS_PROXY plus the CA trust variables
 (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE) when the TLS bridge
 runs. A variable already set in rossoctl's own environment is left alone.
 
+With --proxyContainerImage the pipeline runs in a container from that image
+instead of in this process. The config is mounted read-only at /tmp/config.yaml
+and passed as --config; ports 8080, 8081, 9093, and 9094 are published on
+ephemeral host ports, discovered after startup, and the proxy variables point at
+the host port for 8081. When the config's tls_bridge generates its own CA, a
+temporary directory is mounted at tls_bridge.ca_dir to receive it, exec waits up
+to 30s for ca.crt to appear there, and the CA trust variables point at it. The
+container is stopped and the temporary directory removed when the command exits.
+This needs docker or podman on PATH ($ROSSOCORTEX_RUNTIME overrides which).
+
 Authbridge's own log output goes to --logfile (default /tmp/authbridge.log), not
 to stderr, so it does not interleave with the command's output. The path is
 printed at startup. Pass --logfile "" to log to stderr instead.
@@ -165,9 +176,10 @@ tool results. Bind it to a loopback address only.`,
 	},
 }
 
-// runCortexExec resolves the cortex context, materializes and loads the config,
-// brings up the outbound pipeline and session API, runs the pass-through
-// command, and mirrors its exit status.
+// runCortexExec validates the invocation — a command after "--", a --config, a
+// resolvable cortex context — and sets up logging, then hands off to
+// execWithPipeline, whose error (the command's exit status, or a setup failure)
+// it returns unchanged.
 func runCortexExec(cmd *cobra.Command, args []string) error {
 	argv, err := passthroughArgs(cmd, args)
 	if err != nil {
@@ -193,6 +205,36 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 	}
 	defer logClose()
 
+	return execWithPipeline(cmd, argv)
+}
+
+// authbridgeHost is what a proxy implementation hands back to execWithPipeline:
+// the environment the child needs to reach it, and the channel an async listener
+// failure arrives on.
+//
+// stop tears the host down. It is the counterpart of the constructor's stepwise
+// setup, so it must be called on every exit path — including a setup failure
+// partway through, where it undoes only what was built.
+type authbridgeHost struct {
+	// env is the child's environment, already carrying the proxy and CA trust
+	// variables. Nil means "inherit rossoctl's" (see exec.Cmd.Env).
+	env []string
+
+	// serveErr carries an async listener failure from its goroutine back to the
+	// command loop. Never nil.
+	serveErr <-chan error
+
+	// stop shuts the host down in reverse construction order. Never nil.
+	stop func()
+}
+
+// execWithPipeline loads the config, brings the host up around the child
+// command, runs the command, and tears the host down once it exits or a signal
+// arrives.
+//
+// The returned error is the child's status (as an *exitCodeError) when the
+// command ran, or a setup failure otherwise.
+func execWithPipeline(cmd *cobra.Command, argv []string) error {
 	// Materialize the config as a local file: config.Load is path-based, so a
 	// remote config must be written to disk first. cleanup removes the temp file
 	// (and only a temp file — never a user's own config).
@@ -207,19 +249,62 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config %s: %w", execArgs.config, err)
 	}
 
-	return execWithPipeline(cmd, argv, cfg)
+	// --proxyContainerImage hosts the pipeline in a container instead of in this
+	// process. The two paths produce the same *authbridgeHost, so everything from
+	// here down — the child command, its environment, the teardown — is common.
+	host, err := startHost(cmd, cfg, path)
+	if err != nil {
+		return err
+	}
+	defer host.stop()
+
+	return runPassthrough(cmd, argv, host.env, host.serveErr)
 }
 
-// execWithPipeline brings up the whole host around the child command — outbound
-// pipeline, session store, TLS bridge, forward proxy, session API — and tears it
-// all down once the command exits or a signal arrives. Teardown is by deferred
-// calls, so it runs in reverse construction order on every exit path, including
-// a setup failure partway through.
+// startHost brings up the pipeline the child command runs behind, in a container
+// when --proxyContainerImage names one and in this process otherwise.
 //
-// The returned error is the child's status (as an *exitCodeError) when the
-// command ran, or a setup failure otherwise.
-func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) error {
+// cfgPath is the realized config file, which only the container path needs: it
+// mounts the file rather than reusing the already-parsed cfg.
+func startHost(cmd *cobra.Command, cfg *config.Config, cfgPath string) (*authbridgeHost, error) {
+	if execArgs.proxyContainerImage != "" {
+		// ApplyPreset and Validate would otherwise be skipped on this path: the
+		// container does its own loading, but the CA-directory decision below
+		// reads fields a preset fills in, and a config broken enough to fail
+		// validation is better reported here than as a container that exits.
+		config.ApplyPreset(cfg)
+		if err := config.Validate(cfg); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+		return startAuthbridgeContainer(cmd, cfg, cfgPath, execArgs.proxyContainerImage)
+	}
+	return startAuthbridgeHost(cmd, cfg)
+}
+
+// startAuthbridgeHost builds and starts everything the child command runs
+// behind — outbound pipeline, session store, TLS bridge, forward proxy, session
+// API — and returns the child's environment plus the teardown for all of it.
+//
+// Teardown is accumulated as the host is built rather than deferred, because it
+// has to outlive this function: the caller runs the command and only then tears
+// the host down. On a setup failure the accumulated teardown runs here, so a
+// half-built host never escapes.
+func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHost, error) {
 	errOut := cmd.ErrOrStderr()
+
+	// stops holds the teardown steps in construction order; stop runs them in
+	// reverse, the same order deferred calls would have.
+	var stops []func()
+	stop := func() {
+		for i := len(stops) - 1; i >= 0; i-- {
+			stops[i]()
+		}
+	}
+	// fail tears down what was built and reports why setup stopped.
+	fail := func(err error) (*authbridgeHost, error) {
+		stop()
+		return nil, err
+	}
 
 	// Apply the mode's preset and validate before building anything, so a bad
 	// config is reported as such rather than as an obscure plugin error. This
@@ -232,7 +317,7 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 	applySessionServerOverride(cmd, cfg, errOut)
 
 	if err := config.Validate(cfg); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
+		return fail(fmt.Errorf("invalid config: %w", err))
 	}
 
 	// The SPIFFE provider is built only when something actually consumes it:
@@ -251,28 +336,27 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 			MirrorDir:   cfg.SPIFFE.MirrorDir,
 		})
 		if err != nil {
-			return fmt.Errorf("spiffe provider: %w", err)
+			return fail(fmt.Errorf("spiffe provider: %w", err))
 		}
-		defer p.Close()
+		stops = append(stops, func() { p.Close() })
 		provider = p
 	}
 
 	outbound, err := plugins.BuildWithSPIFFE(cfg.Pipeline.Outbound.Plugins, provider)
 	if err != nil {
-		return fmt.Errorf("building outbound pipeline: %w", err)
+		return fail(fmt.Errorf("building outbound pipeline: %w", err))
 	}
 
 	startCtx, cancelStart := context.WithTimeout(cmd.Context(), pipelineStartTimeout)
 	defer cancelStart()
 	if err := outbound.Start(startCtx); err != nil {
-		return fmt.Errorf("starting outbound pipeline: %w", err)
+		return fail(fmt.Errorf("starting outbound pipeline: %w", err))
 	}
-	// Stop the pipeline on every exit path, including a setup failure below.
-	defer func() {
+	stops = append(stops, func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		outbound.Stop(stopCtx)
-	}()
+	})
 
 	// Warm the plugin catalog so a factory violating the constructor contract
 	// surfaces here rather than on the first /v1/plugins request.
@@ -287,7 +371,7 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 	if cfg.Session.SessionEnabled() {
 		ttl, maxEvents, maxSessions := sessionBounds(cfg, errOut)
 		sessions = session.New(ttl, maxEvents, maxSessions)
-		defer sessions.Close()
+		stops = append(stops, sessions.Close)
 		if verbose {
 			fmt.Fprintf(errOut, "session tracking enabled (ttl %s, maxEvents %d, maxSessions %d)\n",
 				ttl, maxEvents, maxSessions)
@@ -298,7 +382,7 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 	// A nil engine leaves the proxy's blind-CONNECT-tunnel behavior intact.
 	bridge, caCertPath, err := buildTLSBridge(cfg, errOut)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	// serveErr carries an async listener failure (session API or forward proxy)
@@ -310,15 +394,15 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 	// pipeline is built but never invoked.
 	proxyAddr, proxySrv, err := startForwardProxy(cfg, outboundH, sessions, bridge, errOut)
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	defer shutdownHTTP(proxySrv, "forward proxy", errOut)
+	stops = append(stops, func() { shutdownHTTP(proxySrv, "forward proxy", errOut) })
 
 	apiSrv, err := startSessionAPI(cfg.Listener.SessionAPIAddr, outboundH, sessions, serveErr, errOut)
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	defer func() {
+	stops = append(stops, func() {
 		if apiSrv == nil {
 			return
 		}
@@ -327,19 +411,23 @@ func execWithPipeline(cmd *cobra.Command, argv []string, cfg *config.Config) err
 		if err := apiSrv.Shutdown(ctx); err != nil {
 			fmt.Fprintf(errOut, "session API shutdown: %v\n", err)
 		}
-	}()
+	})
 
 	// A listener that failed to bind (e.g. port in use) is a setup error: report
 	// it instead of running the command in a half-configured host.
 	select {
 	case err := <-serveErr:
 		if err != nil {
-			return fmt.Errorf("listener: %w", err)
+			return fail(fmt.Errorf("listener: %w", err))
 		}
 	default:
 	}
 
-	return runPassthrough(cmd, argv, childEnv(proxyAddr, caCertPath, errOut), serveErr)
+	return &authbridgeHost{
+		env:      childEnv(proxyAddr, caCertPath, errOut),
+		serveErr: serveErr,
+		stop:     stop,
+	}, nil
 }
 
 // applySessionServerOverride applies --sessionServer to cfg. It is a no-op
@@ -963,6 +1051,8 @@ func init() {
 		"file to write authbridge's log output to")
 	f.StringVar(&execArgs.sessionServer, "sessionServer", defaultSessionServer,
 		`address for the session API; overrides listener.session_api_addr when set. "" disables session tracking`)
+	f.StringVar(&execArgs.proxyContainerImage, "proxyContainerImage", "",
+		"run the pipeline in a container from this image instead of in-process")
 
 	authbridgeCmd := newGroup("authbridge", "Run commands behind an AuthBridge pipeline")
 

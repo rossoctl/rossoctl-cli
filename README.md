@@ -29,14 +29,6 @@ rossoctl login
 rossoctl agents list
 ```
 
-## Quick usage, for Alek-style Docker Rossoctl Cortext
-
-```sh
-rossoctl doctor
-rossoctl cortex start
-# (under construction)
-```
-
 ## Running a command behind an AuthBridge pipeline
 
 ```sh

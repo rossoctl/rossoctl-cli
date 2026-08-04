@@ -2,7 +2,7 @@
 #
 # To run
 # ```bash
-# rossoctl authbridge exec --config examples/context-guru-tls-bridge.yaml -- claude
+# rossoctl authbridge exec --proxyContainerImage authbridge:local --config examples/context-guru-tls-bridge.yaml -- claude
 # ```
 #
 # While Claude Code is running, in another window, do
@@ -14,9 +14,9 @@ mode: proxy-sidecar
 listener:
   roles: [forward]             # egress-only: no reverse proxy at all
   # For container-based VM proxies (docker or podman on Mac), hardcode the port
-  # forward_proxy_addr: "0.0.0.0:8081"
+  forward_proxy_addr: "0.0.0.0:8081"
   # For host-based proxies, use a random localhost port
-  forward_proxy_addr: "localhost:0"
+  # forward_proxy_addr: "localhost:0"
 
 # TLS termination of agent egress so the outbound pipeline sees decrypted HTTPS.
 tls_bridge:
