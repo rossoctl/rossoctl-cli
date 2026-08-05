@@ -42,6 +42,12 @@ pipeline:
   inbound:
     plugins:
     - config:
+        # The aud claim inbound tokens must carry: this service's SPIFFE ID.
+        # Setting it literally also keeps the plugin off its default of reading
+        # /shared/client-id.txt, which only exists when running under Rossoctl —
+        # locally that file is absent, so the plugin would start with its
+        # identity pending and reject every token with 503.
+        audience: spiffe://localtest.me/ns/team1/sa/weather-service
         issuer: http://keycloak.localtest.me:8080/realms/rossoctl
         keycloak_realm: rossoctl
         keycloak_url: http://keycloak.localtest.me:8080/
