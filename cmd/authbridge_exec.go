@@ -22,11 +22,13 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/forwardproxy"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/reverseproxy"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
+	"github.com/rossoctl/cortex/authbridge/authlib/shared"
 	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
@@ -113,8 +115,8 @@ func (e *exitCodeError) Error() string {
 
 var authbridgeExecCmd = &cobra.Command{
 	Use:   "exec --config FILE|URL -- COMMAND [ARG...]",
-	Short: "Run a command with an authbridge outbound pipeline",
-	Long: `Run a command hosted by an authbridge outbound pipeline.
+	Short: "Run a command with an authbridge pipeline",
+	Long: `Run a command hosted by an authbridge pipeline.
 
 --config is required and names an authbridge YAML config, either a local file
 path or an http/https URL. A remote config is fetched into a temporary file
@@ -125,12 +127,20 @@ command unchanged: flags in it are the command's own, never rossoctl's. The
 command is run with its stdin, stdout, and stderr connected to rossoctl's, and
 rossoctl exits with the command's exit status.
 
-While the command runs, exec hosts it behind the config's outbound plugin
-pipeline:
+While the command runs, exec hosts it behind the config's plugin pipelines. Both
+the inbound and outbound pipelines are built and started; listener.roles decides
+which listeners feed traffic into them:
 
   - The forward proxy listens on listener.forward_proxy_addr when
-    listener.roles includes "forward". This is what feeds traffic through the
-    pipeline, so without it the pipeline is built but never invoked.
+    listener.roles includes "forward". This is what feeds the command's own
+    egress through the outbound pipeline, so without it that pipeline is built
+    but never invoked.
+  - The reverse proxy listens on listener.reverse_proxy_addr when
+    listener.roles includes "reverse", and forwards to
+    listener.reverse_proxy_backend — usually the command itself. Callers reach
+    the command through this address, and their requests run the inbound
+    pipeline on the way in. Its bound address is printed at startup, so a
+    port of 0 still tells you where to connect.
   - The TLS bridge terminates the command's outbound TLS when tls_bridge is
     present and not disabled, so the pipeline sees decrypted HTTPS instead of an
     opaque CONNECT tunnel.
@@ -139,10 +149,18 @@ pipeline:
     --sessionServer overrides that address when given, and --sessionServer ""
     turns session tracking off entirely.
 
+mTLS is NOT enforced. exec runs without a SPIFFE identity, because obtaining one
+blocks on the SPIRE workload API, so the listeners accept plaintext only. An
+mtls.mode of permissive runs with a notice; strict is refused rather than
+silently downgraded, since serving plaintext to every caller is the opposite of
+what it asks for. Run the pipeline in a cluster to enforce it.
+
 The command's environment points it at what was started: HTTP_PROXY when the
 forward proxy runs, and additionally HTTPS_PROXY plus the CA trust variables
 (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE) when the TLS bridge
-runs. A variable already set in rossoctl's own environment is left alone.
+runs. A variable already set in rossoctl's own environment is left alone. The
+reverse proxy adds nothing: it is where callers reach the command, not where the
+command sends its own traffic.
 
 With --proxyContainerImage the pipeline runs in a container from that image
 instead of in this process. The config is mounted read-only at /tmp/config.yaml
@@ -282,8 +300,9 @@ func startHost(cmd *cobra.Command, cfg *config.Config, cfgPath string) (*authbri
 }
 
 // startAuthbridgeHost builds and starts everything the child command runs
-// behind — outbound pipeline, session store, TLS bridge, forward proxy, session
-// API — and returns the child's environment plus the teardown for all of it.
+// behind — both plugin pipelines, the session and shared stores, the TLS bridge,
+// the forward and reverse proxies, and the session API — and returns the child's
+// environment plus the teardown for all of it.
 //
 // Teardown is accumulated as the host is built rather than deferred, because it
 // has to outlive this function: the caller runs the command and only then tears
@@ -326,20 +345,47 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 	// host without SPIRE. Need-driven construction matches authbridge-proxy.
 	var provider *spiffe.Provider
 	if cfg.SPIFFE != nil && spiffeProviderNeeded(cfg) {
-		mirrorFiles := true
-		if cfg.SPIFFE.MirrorFiles != nil {
-			mirrorFiles = *cfg.SPIFFE.MirrorFiles
+		slog.Warn("SPIFFE configuration ignored for local testing")
+	}
+
+	// With no provider there is no X509Source, so no listener here can present a
+	// certificate or verify a peer's. Strict mode means "reject callers that do
+	// not present one" — honoring it is impossible, and proceeding would serve
+	// plaintext to everyone, the exact opposite of what was asked for. Refusing
+	// to start is the only honest option.
+	//
+	// Permissive is different: a permissive listener accepts plaintext alongside
+	// TLS, so a plaintext-only listener is a subset of what was requested rather
+	// than a contradiction of it.
+	if cfg.MTLS != nil {
+		if cfg.MTLS.ResolvedMode() == config.MTLSModeStrict {
+			return fail(fmt.Errorf("mtls.mode: strict requires a SPIFFE workload API, " +
+				"which `authbridge exec` does not connect to; use permissive for local " +
+				"testing, or run the pipeline in a cluster"))
 		}
-		p, err := spiffe.NewProvider(cmd.Context(), spiffe.ProviderConfig{
-			SocketPath:  cfg.SPIFFE.Socket,
-			MirrorFiles: mirrorFiles,
-			MirrorDir:   cfg.SPIFFE.MirrorDir,
-		})
-		if err != nil {
-			return fail(fmt.Errorf("spiffe provider: %w", err))
-		}
-		stops = append(stops, func() { p.Close() })
-		provider = p
+		// Unconditional, not verbose-gated: an operator who wrote an mtls block
+		// has a security expectation, and quietly not meeting it should be loud.
+		fmt.Fprintln(errOut, "mtls is configured but not enforced: `authbridge exec` runs "+
+			"without a SPIFFE identity, so listeners accept plaintext only")
+	}
+
+	// A direction with no plugins passes everything through. That is legal and
+	// occasionally intended, but it is worth saying next to the config rather
+	// than leaving it to be inferred from the first request.
+	config.WarnEmptyPipelines(cfg, slog.Default())
+
+	// Both directions are built regardless of which roles are active, mirroring
+	// authbridge-proxy: roles select which *listeners* open, not which pipelines
+	// exist. The session API reports both compositions, so an inbound pipeline no
+	// listener drives is still visible to an operator inspecting the host.
+	//
+	// Building it is also not optional for the reverse proxy: pipeline.NewHolder
+	// requires a non-nil pipeline, and reverseproxy.NewServer's director calls
+	// through the holder on every request, so a nil pipeline would panic on the
+	// first one. An empty plugin list yields a valid pass-through pipeline.
+	inbound, err := plugins.BuildWithSPIFFE(cfg.Pipeline.Inbound.Plugins, provider)
+	if err != nil {
+		return fail(fmt.Errorf("building inbound pipeline: %w", err))
 	}
 
 	outbound, err := plugins.BuildWithSPIFFE(cfg.Pipeline.Outbound.Plugins, provider)
@@ -358,11 +404,35 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 		outbound.Stop(stopCtx)
 	})
 
+	// Inbound shares outbound's start budget, as the authbridge binaries' single
+	// initialization context does. Its teardown is registered after outbound's, so
+	// the reverse-order stop takes inbound down first and an in-flight inbound
+	// request can still complete its outbound leg.
+	if err := inbound.Start(startCtx); err != nil {
+		return fail(fmt.Errorf("starting inbound pipeline: %w", err))
+	}
+	stops = append(stops, func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		inbound.Stop(stopCtx)
+	})
+
 	// Warm the plugin catalog so a factory violating the constructor contract
 	// surfaces here rather than on the first /v1/plugins request.
 	plugins.WarmCatalog()
 
+	inboundH := pipeline.NewHolder(inbound)
 	outboundH := pipeline.NewHolder(outbound)
+
+	// Inbound plugins with no reverse listener to drive them were built and
+	// started but will never be called. Say so rather than letting an operator
+	// conclude their jwt-validation is protecting anything. Stderr and
+	// unconditional: this is a "your config does not do what you think" message,
+	// and slog goes to --logfile where it would not be seen.
+	if len(cfg.Pipeline.Inbound.Plugins) > 0 && !cfg.Listener.ActiveRoles()[config.RoleReverse] {
+		fmt.Fprintln(errOut, "pipeline.inbound has plugins but listener.roles does not "+
+			"include \"reverse\"; inbound plugins will never run")
+	}
 
 	// The session store backs both the forward proxy's recording and the session
 	// API's reads, so it is created once, before either. Session tracking
@@ -378,6 +448,22 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 		}
 	}
 
+	// The shared store is process-scoped state both proxies read and write: a
+	// credential placeholder written by an inbound plugin is resolved by an
+	// outbound one, which only works if the two listeners hold the same store.
+	// Created unconditionally — it is cheap, and a nil store would silently
+	// disable placeholder resolution rather than fail visibly.
+	//
+	// New starts a TTL janitor goroutine, so Close has to run on every exit path.
+	// It is registered here rather than deferred because teardown outlives this
+	// function; Close is safe to call more than once. Registering it before the
+	// proxies means the reverse-order stop closes it after both have stopped
+	// serving, so no in-flight request sees a store whose janitor has gone. That
+	// ordering matters here in a way it does not in the authbridge binaries,
+	// where the equivalent defer runs as the process exits.
+	sharedStore := shared.New()
+	stops = append(stops, sharedStore.Close)
+
 	// The TLS bridge must exist before the forward proxy, which consumes it.
 	// A nil engine leaves the proxy's blind-CONNECT-tunnel behavior intact.
 	bridge, caCertPath, err := buildTLSBridge(cfg, errOut)
@@ -385,20 +471,32 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 		return fail(err)
 	}
 
-	// serveErr carries an async listener failure (session API or forward proxy)
-	// from its goroutine back to the command loop.
+	// serveErr carries an async listener failure from its goroutine back to the
+	// command loop. Only the session API writes to it: both proxies report a bind
+	// failure synchronously, and a later serve failure only reaches slog, so a
+	// mid-run death there shows up in --logfile rather than here. Buffered so the
+	// writing goroutine never blocks even when nobody is selecting.
 	serveErr := make(chan error, 2)
 
 	// Start the forward proxy when the forward role is active. This is what
 	// actually feeds traffic through the outbound pipeline: without it the
 	// pipeline is built but never invoked.
-	proxyAddr, proxySrv, err := startForwardProxy(cfg, outboundH, sessions, bridge, errOut)
+	proxyAddr, proxySrv, err := startForwardProxy(cfg, outboundH, sessions, bridge, sharedStore, errOut)
 	if err != nil {
 		return fail(err)
 	}
 	stops = append(stops, func() { shutdownHTTP(proxySrv, "forward proxy", errOut) })
 
-	apiSrv, err := startSessionAPI(cfg.Listener.SessionAPIAddr, outboundH, sessions, serveErr, errOut)
+	// The reverse proxy is registered after the forward one so it shuts down
+	// first: stop accepting new inbound work before tearing down the egress path
+	// that work depends on.
+	reverseSrv, err := startReverseProxy(cfg, inboundH, sessions, sharedStore, errOut)
+	if err != nil {
+		return fail(err)
+	}
+	stops = append(stops, func() { shutdownHTTP(reverseSrv, "reverse proxy", errOut) })
+
+	apiSrv, err := startSessionAPI(cfg.Listener.SessionAPIAddr, inboundH, outboundH, sessions, serveErr, errOut)
 	if err != nil {
 		return fail(err)
 	}
@@ -555,6 +653,7 @@ func startForwardProxy(
 	outboundH *pipeline.Holder,
 	sessions *session.Store,
 	bridge *tlsbridge.Engine,
+	sharedStore pipeline.SharedStore,
 	errOut io.Writer,
 ) (string, *http.Server, error) {
 	if !cfg.Listener.ActiveRoles()[config.RoleForward] {
@@ -579,6 +678,9 @@ func startForwardProxy(
 	}
 	srv.SkipHosts = skipHosts
 	srv.TLSBridge = bridge
+	// Both proxies must hold the same store, or a placeholder written by an
+	// inbound plugin is never resolved on the way out.
+	srv.Shared = sharedStore
 
 	// Bind the listener here rather than via runtimeutil.StartHTTPServer, which
 	// keeps it internal. We need the *bound* address: with port 0 the kernel
@@ -607,6 +709,115 @@ func startForwardProxy(
 	return proxyURL(bound), httpSrv, nil
 }
 
+// startReverseProxy starts the inbound (reverse) proxy when the reverse role is
+// active, returning the server for shutdown. It is nil when the reverse role is
+// inactive or the address was explicitly blanked.
+//
+// No address is returned, unlike startForwardProxy: the reverse proxy is where
+// *callers* reach the hosted service, not where the hosted command sends its
+// egress, so nothing in the child's environment depends on it.
+//
+// The listener is bound here rather than through runtimeutil.StartReverseProxyServer,
+// which keeps it internal. Same reason as the forward proxy: we need the *bound*
+// address, since with port 0 the kernel assigns the port and ":0" is not
+// something an operator can hand to a caller. Server.Listen is still what binds,
+// so the TLS-sniffing listener an mTLS config would need stays in the path — only
+// the Serve call moves out here.
+func startReverseProxy(
+	cfg *config.Config,
+	inboundH *pipeline.Holder,
+	sessions *session.Store,
+	sharedStore pipeline.SharedStore,
+	errOut io.Writer,
+) (*http.Server, error) {
+	if !cfg.Listener.ActiveRoles()[config.RoleReverse] {
+		return nil, nil
+	}
+	// ApplyPreset fills in a per-mode default (":8080" for proxy-sidecar), so an
+	// empty address here means the operator explicitly blanked it — treat that as
+	// "no reverse proxy" rather than binding an arbitrary port.
+	addr := cfg.Listener.ReverseProxyAddr
+	if addr == "" {
+		fmt.Fprintln(errOut, "listener.reverse_proxy_addr is empty; no reverse proxy started")
+		return nil, nil
+	}
+
+	backend := cfg.Listener.ReverseProxyBackend
+	if err := validateBackendURL(backend); err != nil {
+		return nil, fmt.Errorf("listener.reverse_proxy_backend: %w", err)
+	}
+
+	// mTLS is deliberately off: reverseproxy.MTLSOptions needs an X509Source from
+	// a SPIFFE provider, and exec keeps that provider nil because NewProvider
+	// blocks on the SPIRE Workload API. A strict config is rejected earlier, in
+	// startAuthbridgeHost, so reaching here means plaintext is acceptable.
+	srv, err := reverseproxy.NewServer(inboundH, sessions, backend, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating reverse proxy: %w", err)
+	}
+	srv.Shared = sharedStore
+
+	ln, err := srv.Listen(addr)
+	if err != nil {
+		return nil, fmt.Errorf("reverse-proxy listen on %s: %w", addr, err)
+	}
+	bound := ln.Addr().String()
+
+	httpSrv := &http.Server{
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		slog.Info("Reverse server listening", "name", "reverse-proxy", "addr", bound,
+			"mtls", srv.MTLSEnabled())
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Reverse server failed", "name", "reverse-proxy", "error", err)
+		}
+	}()
+
+	// Printed unconditionally, like the session API's address: callers of the
+	// hosted service need to know where to send traffic, and slog output goes to
+	// --logfile where they would have to go looking for it.
+	//
+	// Deliberately no wildcard warning here, unlike the session API: that
+	// endpoint is unauthenticated, whereas a reverse proxy exists to receive
+	// callers from elsewhere, so binding every interface is its job rather than a
+	// mistake.
+	fmt.Fprintf(errOut, "reverse proxy listening on %s -> %s\n", bound, backend)
+	return httpSrv, nil
+}
+
+// validateBackendURL rejects a reverse_proxy_backend that parses but cannot be
+// proxied to.
+//
+// reverseproxy.NewServer only calls url.Parse, which accepts an empty string, a
+// bare "localhost:8001" (whose host becomes the *scheme*), and a scheme-only
+// "http://". Each yields a server that binds cleanly and then fails every
+// request with a 502 that says nothing about why, so the mistake is worth
+// catching at startup where it can name the field.
+//
+// Reachability is deliberately not checked: the backend is typically the hosted
+// command itself, which has not started listening yet when the host is built, so
+// a dial probe would fail on every correct invocation.
+func validateBackendURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("is required when the reverse role is active")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid URL: %w", raw, err)
+	}
+	// A bare "host:port" parses with the host as the scheme, which is by far the
+	// most common way to get this wrong.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%q needs an http:// or https:// scheme (got scheme %q)", raw, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%q has no host", raw)
+	}
+	return nil
+}
+
 // startSessionAPI starts the session API on addr when addr is set and session
 // tracking is on. Serving happens in a goroutine so the caller can carry on to
 // the command; a serve failure arrives on serveErr rather than killing the
@@ -619,7 +830,7 @@ func startForwardProxy(
 // up at all.
 func startSessionAPI(
 	addr string,
-	outboundH *pipeline.Holder,
+	inboundH, outboundH *pipeline.Holder,
 	sessions *session.Store,
 	serveErr chan<- error,
 	errOut io.Writer,
@@ -628,8 +839,12 @@ func startSessionAPI(
 		return nil, nil
 	}
 
+	// Both holders are passed so /v1/pipeline reports what was actually
+	// configured. Reporting only outbound would understate a config with an
+	// inbound pipeline, which reads as "no inbound plugins" rather than "not
+	// shown".
 	srv := sessionapi.New(addr, sessions,
-		sessionapi.WithPipelines(nil, outboundH),
+		sessionapi.WithPipelines(inboundH, outboundH),
 		sessionapi.WithCatalog(sessionapi.PluginsCatalog),
 	)
 

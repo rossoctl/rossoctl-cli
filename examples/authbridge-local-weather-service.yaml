@@ -1,0 +1,59 @@
+# AuthBridge config for the weather demo
+#
+# The weather service runs as the hosted command, with authbridge on both sides
+# of it: callers come in through the reverse proxy, and the service's own calls
+# to other APIs go out through the forward proxy.
+#
+# To run
+# ```bash
+# rossoctl authbridge exec --config examples/authbridge-local-weather-service.yaml \
+#   -- uv run --no-sync server
+# ```
+#
+# While the weather service is running, in another window, do
+# ```bash
+# tail -f /tmp/authbridge.log
+# ```
+#
+# Send requests to :8000, not :8001 — going straight to the service bypasses JWT
+# validation entirely:
+# ```bash
+# curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/
+# ```
+#
+# NOTE: `mtls` and `spiffe` below describe the in-cluster posture and are NOT
+# enforced by `authbridge exec`, which runs without a SPIFFE identity. Locally
+# the listeners accept plaintext, and exec says so at startup.
+#
+listener:
+  # Where the weather service's own outbound traffic leaves through. exec sets
+  # HTTP_PROXY/HTTPS_PROXY to this for the hosted command.
+  forward_proxy_addr: :8081
+  # Where callers reach the service. Requests arriving here run the inbound
+  # pipeline (JWT validation) and are then forwarded to the backend below.
+  reverse_proxy_addr: :8000
+  # The weather service itself, which must listen here. It is deliberately not
+  # :8000 — that is authbridge's address, in front of it.
+  reverse_proxy_backend: http://127.0.0.1:8001
+mode: proxy-sidecar
+mtls:
+  mode: permissive
+pipeline:
+  inbound:
+    plugins:
+    - config:
+        issuer: http://keycloak.localtest.me:8080/realms/rossoctl
+        keycloak_realm: rossoctl
+        keycloak_url: http://keycloak.localtest.me:8080/
+      name: jwt-validation
+  outbound:
+    plugins:
+    - config:
+        default_policy: passthrough
+        identity:
+          type: client-secret
+        keycloak_realm: rossoctl
+        keycloak_url: http://keycloak.localtest.me:8080/
+      name: token-exchange
+spiffe:
+  socket: unix:///spiffe-workload-api/spire-agent.sock

@@ -21,21 +21,29 @@ import (
 )
 
 // pipelineOnlyConfig is a valid authbridge config that starts no forward proxy:
-// the outbound pipeline is built and started, but no traffic is intercepted. Used
-// by the many tests that only care about argument handling and exit codes.
+// the outbound pipeline is built and started, but no egress is intercepted, so no
+// proxy variables reach the child. Used by the many tests that only care about
+// argument handling and exit codes.
 //
 // listener.roles is set to reverse (with the backend the validator requires) so
 // the forward role is inactive.
 //
-// The session API is bound to a per-test free port rather than disabled: an empty
-// session_api_addr cannot express "off", because config.ApplyPreset cannot tell
-// it from unset and substitutes the preset default (":9094"). Leaving it empty
-// would make every test bind that one real, wildcard port.
+// Both listeners are bound to per-test free ports rather than disabled, because
+// an empty address cannot express "off": config.ApplyPreset cannot tell empty
+// from unset and substitutes the preset default (":9094" for the session API,
+// ":8080" for the reverse proxy). Left empty, every test using this fixture would
+// bind those two real, wildcard ports and collide with each other.
+//
+// The reverse address matters even though these tests send it no traffic: the
+// reverse role is active, so a listener really does open. The backend is a
+// deliberately dead port — nothing dials through it, and it exists only because
+// the validator requires the field.
 func pipelineOnlyConfig(t *testing.T) string {
 	t.Helper()
 	return fmt.Sprintf(`mode: proxy-sidecar
 listener:
   roles: [reverse]
+  reverse_proxy_addr: "127.0.0.1:%d"
   reverse_proxy_backend: "http://127.0.0.1:1"
   session_api_addr: "127.0.0.1:%d"
 pipeline:
@@ -48,7 +56,7 @@ pipeline:
           key: demo
           mappings:
             demo: sk-demo-token
-`, freePort(t))
+`, freePort(t), freePort(t))
 }
 
 // forwardConfig is a valid forward-role (outbound) host config: it starts a
@@ -78,6 +86,29 @@ pipeline:
 func forwardAddr(t *testing.T) string {
 	t.Helper()
 	return fmt.Sprintf("127.0.0.1:%d", freePort(t))
+}
+
+// reverseConfig is a valid reverse-role (inbound) host config: it starts a
+// reverse proxy on reverseAddr forwarding to backend, and the session API on a
+// per-test free port. A reverse-only host needs no forward_proxy_addr, and
+// injects no proxy variables into the child.
+//
+// The inbound pipeline uses inference-parser rather than jwt-validation: it
+// observes and records without rejecting, so a test can prove traffic reached
+// the backend without standing up a Keycloak to mint a token.
+func reverseConfig(t *testing.T, reverseAddr, backend string) string {
+	t.Helper()
+	return fmt.Sprintf(`mode: proxy-sidecar
+listener:
+  roles: [reverse]
+  reverse_proxy_addr: %q
+  reverse_proxy_backend: %q
+  session_api_addr: "127.0.0.1:%d"
+pipeline:
+  inbound:
+    plugins:
+      - name: inference-parser
+`, reverseAddr, backend, freePort(t))
 }
 
 // writeConfig writes a --config document to a temp file and returns its path.
@@ -1373,5 +1404,381 @@ func TestIsHTTPURL(t *testing.T) {
 				t.Errorf("isHTTPURL(%q) = %v, want %v", tc.ref, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAuthbridgeExecReverseProxyForwardsToBackend verifies the reverse proxy
+// actually carries inbound traffic: a caller reaching the proxy's address is
+// forwarded through the inbound pipeline to reverse_proxy_backend, and the
+// listener is gone once exec returns.
+//
+// This is the end-to-end proof of the feature. The child does the calling, since
+// the reverse proxy only runs while the hosted command does.
+func TestAuthbridgeExecReverseProxyForwardsToBackend(t *testing.T) {
+	isolateHome(t)
+
+	// The backend records the Host header it saw. reverseproxy rewrites it to the
+	// backend's own host, which Cloudflare-fronted upstreams require; asserting it
+	// here is a cheap guard on that wiring.
+	gotHost := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case gotHost <- r.Host:
+		default:
+		}
+		_, _ = w.Write([]byte("backend-reached"))
+	}))
+	defer backend.Close()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	cfg := writeConfig(t, reverseConfig(t, addr, backend.URL))
+
+	// --retry-connrefused rather than a sleep: startReverseProxy returns only
+	// after the listener is bound, so this is belt-and-braces for a loaded box
+	// rather than a race, and a fixed sleep would be a flake either way.
+	script := fmt.Sprintf(`curl -sf -m 5 --retry 3 --retry-connrefused http://%s/v1/chat/completions`, addr)
+
+	stdout, stderr, err := executeSplit(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"),
+		"--", "sh", "-c", script)
+	if err != nil {
+		t.Fatalf("authbridge exec: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "backend-reached") {
+		t.Errorf("request did not reach the backend through the reverse proxy:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	// The announcement is how an operator learns where to send callers.
+	if want := "reverse proxy listening on " + addr; !strings.Contains(stderr, want) {
+		t.Errorf("stderr should announce %q:\n%s", want, stderr)
+	}
+	if !strings.Contains(stderr, backend.URL) {
+		t.Errorf("stderr should name the backend %q:\n%s", backend.URL, stderr)
+	}
+
+	// The Host header must name the backend, not the proxy the caller dialed.
+	select {
+	case h := <-gotHost:
+		backendHost := strings.TrimPrefix(backend.URL, "http://")
+		if h != backendHost {
+			t.Errorf("backend saw Host %q, want the backend's own host %q", h, backendHost)
+		}
+	default:
+		t.Error("backend was never reached, so no Host header was recorded")
+	}
+
+	if c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
+		_ = c.Close()
+		t.Errorf("reverse proxy still listening on %s after exec returned", addr)
+	}
+}
+
+// TestAuthbridgeExecNoReverseProxyWithoutReverseRole verifies that a config whose
+// active roles exclude "reverse" opens no reverse listener, even when
+// reverse_proxy_addr names one. Roles select which listeners run; an address
+// alone must not start one.
+func TestAuthbridgeExecNoReverseProxyWithoutReverseRole(t *testing.T) {
+	isolateHome(t)
+
+	// A free port named in the config but never expected to be bound.
+	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	cfg := writeConfig(t, fmt.Sprintf(`mode: proxy-sidecar
+listener:
+  roles: [forward]
+  forward_proxy_addr: %q
+  reverse_proxy_addr: %q
+  reverse_proxy_backend: "http://127.0.0.1:1"
+  session_api_addr: "127.0.0.1:%d"
+pipeline:
+  outbound:
+    plugins:
+      - name: inference-parser
+`, forwardAddr(t), addr, freePort(t)))
+
+	// The child probes while the host is up — after exec returns everything is
+	// down anyway, so probing then would prove nothing.
+	//
+	// --noproxy '*' is essential: this is a forward-role host, so the child
+	// inherits HTTP_PROXY. Without it curl hands the URL to the forward proxy,
+	// which answers, and the probe passes whether or not a reverse listener
+	// exists. The question here is specifically whether addr itself is bound.
+	script := fmt.Sprintf(`curl -s -m 2 --noproxy '*' http://%s/ >/dev/null 2>&1 || printf 'no-reverse-proxy\n'`, addr)
+	out, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "sh", "-c", script)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "no-reverse-proxy") {
+		t.Errorf("a forward-only config should open no reverse listener on %s:\n%s", addr, out)
+	}
+}
+
+// TestAuthbridgeExecReverseProxyBindFailureReported verifies that a reverse proxy
+// which cannot bind is reported synchronously as a setup failure, rather than the
+// command running behind a listener that never came up.
+func TestAuthbridgeExecReverseProxyBindFailureReported(t *testing.T) {
+	isolateHome(t)
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer busy.Close()
+
+	cfg := writeConfig(t, reverseConfig(t, busy.Addr().String(), "http://127.0.0.1:1"))
+	_, execErr := execute(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if execErr == nil {
+		t.Fatal("a reverse proxy that cannot bind should error")
+	}
+	if !strings.Contains(execErr.Error(), "reverse-proxy listen") {
+		t.Errorf("error should name the failed listen: %v", execErr)
+	}
+	var exitErr *exitCodeError
+	if errors.As(execErr, &exitErr) {
+		t.Errorf("a bind failure should not yield a command exit code: %v", execErr)
+	}
+}
+
+// TestAuthbridgeExecReverseProxyResolvesEphemeralPort verifies that a reverse
+// address of port 0 is announced as the real bound port. This is why the listener
+// is bound here rather than inside runtimeutil.StartReverseProxyServer, which
+// keeps it internal: ":0" is not an address anyone can send callers to.
+func TestAuthbridgeExecReverseProxyResolvesEphemeralPort(t *testing.T) {
+	isolateHome(t)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("backend-reached"))
+	}))
+	defer backend.Close()
+
+	cfg := writeConfig(t, reverseConfig(t, "127.0.0.1:0", backend.URL))
+	stdout, stderr, err := executeSplit(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if err != nil {
+		t.Fatalf("authbridge exec: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+
+	// A resolved port, not the configured placeholder.
+	if !strings.Contains(stderr, "reverse proxy listening on 127.0.0.1:") {
+		t.Errorf("stderr should announce the reverse proxy's bound address:\n%s", stderr)
+	}
+	for _, stream := range []struct{ name, body string }{{"stdout", stdout}, {"stderr", stderr}} {
+		if strings.Contains(stream.body, ":0\n") || strings.Contains(stream.body, ":0 ") {
+			t.Errorf("%s reports an unresolved port 0:\n%s", stream.name, stream.body)
+		}
+	}
+}
+
+// TestAuthbridgeExecReverseProxyBackendValidation covers validateBackendURL, whose
+// job is to reject a backend that url.Parse accepts but nothing can proxy to.
+func TestAuthbridgeExecReverseProxyBackendValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend string
+		wantErr bool
+	}{
+		{"http", "http://127.0.0.1:8001", false},
+		{"https with path", "https://example.com/api", false},
+		{"empty", "", true},
+		// Parses cleanly, with "localhost" as the *scheme* — the most common way
+		// to get this wrong.
+		{"bare host:port", "localhost:8001", true},
+		{"scheme only", "http://", true},
+		{"not a url", "://x", true},
+		{"wrong scheme", "ftp://example.com", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBackendURL(tc.backend)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateBackendURL(%q) = %v, wantErr %v", tc.backend, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAuthbridgeExecReverseProxyBackendValidationWired verifies the check is
+// actually reached from exec, which the unit test above cannot show. A bare
+// host:port would otherwise bind fine and 502 every request.
+func TestAuthbridgeExecReverseProxyBackendValidationWired(t *testing.T) {
+	isolateHome(t)
+
+	cfg := writeConfig(t, reverseConfig(t, forwardAddr(t), "localhost:8001"))
+	_, execErr := execute(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if execErr == nil {
+		t.Fatal("a backend with no scheme should error")
+	}
+	if !strings.Contains(execErr.Error(), "reverse_proxy_backend") {
+		t.Errorf("error should name the offending field: %v", execErr)
+	}
+	var exitErr *exitCodeError
+	if errors.As(execErr, &exitErr) {
+		t.Errorf("a config error should not yield a command exit code: %v", execErr)
+	}
+}
+
+// TestAuthbridgeExecStrictMTLSRejected verifies that strict mTLS is refused
+// rather than silently downgraded. exec has no SPIFFE identity, so it cannot
+// reject non-TLS callers as strict demands — serving plaintext to everyone would
+// be the opposite of what the config asks for.
+func TestAuthbridgeExecStrictMTLSRejected(t *testing.T) {
+	isolateHome(t)
+
+	cfg := writeConfig(t, reverseConfig(t, forwardAddr(t), "http://127.0.0.1:1")+
+		"mtls:\n  mode: strict\n")
+	_, execErr := execute(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if execErr == nil {
+		t.Fatal("strict mtls should be refused without a SPIFFE identity")
+	}
+	for _, want := range []string{"strict", "SPIFFE"} {
+		if !strings.Contains(execErr.Error(), want) {
+			t.Errorf("error should mention %q: %v", want, execErr)
+		}
+	}
+	var exitErr *exitCodeError
+	if errors.As(execErr, &exitErr) {
+		t.Errorf("a config refusal should not yield a command exit code: %v", execErr)
+	}
+}
+
+// TestAuthbridgeExecPermissiveMTLSRunsWithNotice verifies permissive mTLS starts
+// but says it is not enforced. A plaintext-only listener is a subset of what
+// permissive accepts, so running is correct — but an operator who wrote an mtls
+// block should not have to guess that it is inert here.
+func TestAuthbridgeExecPermissiveMTLSRunsWithNotice(t *testing.T) {
+	isolateHome(t)
+
+	cfg := writeConfig(t, reverseConfig(t, forwardAddr(t), "http://127.0.0.1:1")+
+		"mtls:\n  mode: permissive\n")
+	stdout, stderr, err := executeSplit(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if err != nil {
+		t.Fatalf("permissive mtls should run: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "mtls is configured but not enforced") {
+		t.Errorf("stderr should say mtls is not enforced:\n%s", stderr)
+	}
+}
+
+// TestAuthbridgeExecInboundWithoutReverseRoleWarns verifies that inbound plugins
+// with no reverse listener to drive them are called out. They are built and
+// started, so nothing fails — but an operator could otherwise believe their
+// inbound validation is protecting something.
+func TestAuthbridgeExecInboundWithoutReverseRoleWarns(t *testing.T) {
+	isolateHome(t)
+
+	cfg := writeConfig(t, fmt.Sprintf(`mode: proxy-sidecar
+listener:
+  roles: [forward]
+  forward_proxy_addr: %q
+  session_api_addr: "127.0.0.1:%d"
+pipeline:
+  inbound:
+    plugins:
+      - name: inference-parser
+  outbound:
+    plugins:
+      - name: inference-parser
+`, forwardAddr(t), freePort(t)))
+
+	stdout, stderr, err := executeSplit(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"), "--", "true")
+	if err != nil {
+		t.Fatalf("authbridge exec: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "inbound plugins will never run") {
+		t.Errorf("stderr should warn that inbound plugins are unused:\n%s", stderr)
+	}
+}
+
+// TestAuthbridgeExecReverseRoleUsesPresetAddr verifies an omitted
+// reverse_proxy_addr falls back to the preset's default rather than starting
+// nothing. This is the counterpart to the forward role's preset test, and is why
+// the shared fixtures name an explicit port: an empty address is not "off".
+func TestAuthbridgeExecReverseRoleUsesPresetAddr(t *testing.T) {
+	isolateHome(t)
+
+	// Skip rather than fail if the preset port is already taken locally: the
+	// address is fixed by the preset, so this test cannot pick a free one.
+	if c, err := net.DialTimeout("tcp", "127.0.0.1:8080", 200*time.Millisecond); err == nil {
+		_ = c.Close()
+		t.Skip("preset reverse-proxy port 8080 is already in use on this host")
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("backend-reached"))
+	}))
+	defer backend.Close()
+
+	// reverse_proxy_addr is deliberately omitted — the preset supplies ":8080".
+	cfg := writeConfig(t, fmt.Sprintf(`mode: proxy-sidecar
+listener:
+  roles: [reverse]
+  reverse_proxy_backend: %q
+  session_api_addr: "127.0.0.1:%d"
+pipeline:
+  inbound:
+    plugins:
+      - name: inference-parser
+`, backend.URL, freePort(t)))
+
+	// The child proves the preset address is really bound, not merely printed.
+	script := `curl -sf -m 5 --retry 3 --retry-connrefused --noproxy '*' http://127.0.0.1:8080/`
+	stdout, stderr, err := executeSplit(t, "authbridge", "exec", "--config", cfg,
+		"--logfile", filepath.Join(t.TempDir(), "authbridge.log"),
+		"--", "sh", "-c", script)
+	if err != nil {
+		t.Fatalf("authbridge exec: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "backend-reached") {
+		t.Errorf("the preset reverse address should be bound and forwarding:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, ":8080") {
+		t.Errorf("stderr should announce the preset address:\n%s", stderr)
+	}
+}
+
+// TestAuthbridgeExecSessionAPIReportsInboundPipeline verifies GET /v1/pipeline
+// reports the inbound composition, not just the outbound one. The session API is
+// handed both holders; wired with only outbound it would report "inbound":[] for a
+// config that plainly configures inbound plugins — a silent lie about what is
+// running.
+func TestAuthbridgeExecSessionAPIReportsInboundPipeline(t *testing.T) {
+	isolateHome(t)
+
+	apiAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	cfg := writeConfig(t, fmt.Sprintf(`mode: proxy-sidecar
+listener:
+  roles: [reverse]
+  reverse_proxy_addr: %q
+  reverse_proxy_backend: "http://127.0.0.1:1"
+  session_api_addr: %q
+pipeline:
+  inbound:
+    plugins:
+      - name: inference-parser
+`, forwardAddr(t), apiAddr))
+
+	// Distinct exit codes so a failure says which half was wrong: an unreachable
+	// API and an empty inbound array are different bugs.
+	script := fmt.Sprintf(
+		`body=$(curl -sf -m 5 --noproxy '*' http://%s/v1/pipeline) || exit 21;`+
+			`printf '%%s\n' "$body";`+
+			`printf '%%s' "$body" | grep -q '"inbound":\[\]' && exit 22;`+
+			`printf '%%s' "$body" | grep -q 'inference-parser' || exit 23`, apiAddr)
+
+	out, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "sh", "-c", script)
+	switch code {
+	case 0: // inbound reported with its plugin
+	case 21:
+		t.Fatalf("session API /v1/pipeline did not answer at %s\n%s", apiAddr, out)
+	case 22:
+		t.Fatalf("/v1/pipeline reports an empty inbound pipeline; the inbound holder is not wired in\n%s", out)
+	case 23:
+		t.Fatalf("/v1/pipeline does not name the configured inbound plugin\n%s", out)
+	default:
+		t.Fatalf("exit code = %d, want 0\n%s", code, out)
 	}
 }
