@@ -184,36 +184,50 @@ func TestAuthbridgeExecCommandPath(t *testing.T) {
 	}
 }
 
-// TestAuthbridgeCortexFlagDeprecated verifies --cortex is marked deprecated on
-// the authbridge group: hidden from help, but still accepted so existing
-// invocations keep working.
-func TestAuthbridgeCortexFlagDeprecated(t *testing.T) {
+// TestAuthbridgeCortexFlagRemoved verifies --cortex is gone from the authbridge
+// group. exec is configured by --config and never resolves a context, so the flag
+// did nothing; it is now removed rather than deprecated, and passing it is an
+// error rather than a silently ignored argument.
+func TestAuthbridgeCortexFlagRemoved(t *testing.T) {
 	c, _, err := rootCmd.Find([]string{"authbridge"})
 	if err != nil {
 		t.Fatalf("authbridge not found: %v", err)
 	}
-	f := c.PersistentFlags().Lookup("cortex")
-	if f == nil {
-		t.Fatal("authbridge has no --cortex flag")
+	// Lookup covers the group's own flags; the inherited set is what exec
+	// actually parses with, and catches the flag reappearing on a parent.
+	if f := c.PersistentFlags().Lookup("cortex"); f != nil {
+		t.Error("authbridge still has a --cortex persistent flag")
 	}
-	if f.Deprecated == "" {
-		t.Error("--cortex should be marked deprecated")
-	}
-	if !f.Hidden {
-		t.Error("a deprecated --cortex should be hidden from help")
+	if f := authbridgeExecCmd.InheritedFlags().Lookup("cortex"); f != nil {
+		t.Error("authbridge exec still inherits a --cortex flag")
 	}
 
-	// Deprecated must not mean rejected: the flag still parses and the command
-	// still runs. It no longer has any effect, though — exec does not resolve a
-	// context, so the named one is not created.
+	// The removal has to be visible at the command line, not just in the flag
+	// set: an invocation still passing --cortex must fail rather than run.
 	isolateHome(t)
 	cfg := writeConfig(t, pipelineOnlyConfig(t))
-	if _, code := execExitCode(t, "authbridge", "exec", "--cortex", "depctx",
-		"--config", cfg, "--", "true"); code != 0 {
-		t.Fatalf("deprecated --cortex should still work: exit %d", code)
+	_, err = execute(t, "authbridge", "exec", "--cortex", "depctx",
+		"--config", cfg, "--", "true")
+	if err == nil {
+		t.Fatal("authbridge exec --cortex should be rejected as an unknown flag")
 	}
-	if _, ok := loadTestConfig(t).Get("depctx"); ok {
-		t.Error("--cortex should no longer create a context: exec must not touch the context config")
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %q, want it to report an unknown flag", err)
+	}
+	// And the rejection must happen before the hosted command runs.
+	var exitErr *exitCodeError
+	if errors.As(err, &exitErr) {
+		t.Errorf("the command should not have run: %v", err)
+	}
+
+	// --cortex must survive where it means something: the removal is scoped to
+	// the authbridge group, not to the flag itself.
+	cortex, _, err := rootCmd.Find([]string{"cortex"})
+	if err != nil {
+		t.Fatalf("cortex not found: %v", err)
+	}
+	if cortex.PersistentFlags().Lookup("cortex") == nil {
+		t.Error("the cortex group should still have --cortex")
 	}
 }
 
@@ -1336,23 +1350,6 @@ func TestCortexExecStdinPassThrough(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello-stdin") {
 		t.Errorf("stdin was not passed through: %q", out)
-	}
-}
-
-// TestCortexExecDoesNotCreateCortexContext verifies exec no longer goes through
-// cortex context resolution: --cortex is accepted but inert, so the context it
-// names is not created. See TestAuthbridgeExecLeavesContextAlone for the broader
-// guarantee this is part of.
-func TestCortexExecDoesNotCreateCortexContext(t *testing.T) {
-	path := isolateHome(t)
-	cfg := writeConfig(t, pipelineOnlyConfig(t))
-
-	if _, code := execExitCode(t, "authbridge", "exec", "--cortex", "execctx", "--config", cfg, "--", "true"); code != 0 {
-		t.Fatalf("authbridge exec --cortex execctx: exit %d", code)
-	}
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("exec created %s; it should not touch the context config (stat err: %v)", path, err)
 	}
 }
 

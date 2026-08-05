@@ -1287,23 +1287,12 @@ func init() {
 	f.StringVar(&execArgs.proxyContainerImage, "proxyContainerImage", "",
 		"run the pipeline in a container from this image instead of in-process")
 
+	// The authbridge group deliberately has no --cortex flag. exec is configured
+	// entirely by --config and never resolves a context, so the flag it used to
+	// register had no effect on anything; an invocation passing it is now
+	// rejected rather than silently ignored. --cortex remains on the cortex
+	// group, where it selects a real cortex.
 	authbridgeCmd := newGroup("authbridge", "Run commands behind an AuthBridge pipeline")
-
-	// --cortex is retained only so existing invocations still parse: exec is
-	// configured by --config and no longer resolves a context at all, so the
-	// flag now has no effect whatsoever. It stays bound to the same cortexName
-	// variable as the cortex group's copy.
-	authbridgeCmd.PersistentFlags().StringVar(&cortexName, "cortex", defaultCortexName,
-		"name of the cortex to operate on")
-	// Deprecated: authbridge exec is configured by --config, not by a cortex.
-	// MarkDeprecated also hides the flag; it keeps working, and pflag prints the
-	// message when it is used.
-	if err := authbridgeCmd.PersistentFlags().MarkDeprecated("cortex",
-		"authbridge exec is configured by --config; --cortex has no effect on the pipeline"); err != nil {
-		// A failure here means the flag name above is wrong — a programming
-		// error, and one that would otherwise pass silently.
-		panic(fmt.Sprintf("marking --cortex deprecated: %v", err))
-	}
 
 	authbridgeCmd.AddCommand(authbridgeExecCmd)
 	rootCmd.AddCommand(authbridgeCmd)
