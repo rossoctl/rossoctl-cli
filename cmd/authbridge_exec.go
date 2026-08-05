@@ -194,10 +194,17 @@ tool results. Bind it to a loopback address only.`,
 	},
 }
 
-// runCortexExec validates the invocation — a command after "--", a --config, a
-// resolvable cortex context — and sets up logging, then hands off to
-// execWithPipeline, whose error (the command's exit status, or a setup failure)
-// it returns unchanged.
+// runCortexExec validates the invocation — a command after "--" and a --config
+// — and sets up logging, then hands off to execWithPipeline, whose error (the
+// command's exit status, or a setup failure) it returns unchanged.
+//
+// It deliberately does not resolve a context. exec is configured entirely by
+// --config, so it needs nothing from the context config: no server, token, or
+// namespace is ever read. It used to call resolveCortexContext, which creates a
+// cortex-typed context and makes it *current* as a side effect — meaning running
+// a command behind a pipeline silently repointed every later rossoctl
+// invocation at a different context. Nothing here consumed the result, so the
+// call was pure side effect and is gone.
 func runCortexExec(cmd *cobra.Command, args []string) error {
 	argv, err := passthroughArgs(cmd, args)
 	if err != nil {
@@ -210,8 +217,19 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--config is required (a local YAML file path or an http/https URL)")
 	}
 
-	if _, err := resolveCortexContext(cmd, false); err != nil {
-		return err
+	// exec ignores the context, but an explicit --context naming one that does
+	// not exist is still reported rather than silently accepted: it is almost
+	// certainly a typo, and staying quiet would hide it. The lookup is read-only
+	// (loadConfigReadOnly, not loadConfig), so a missing config file stays
+	// missing and no context is created.
+	if contextOverride != "" {
+		cfg, err := loadConfigReadOnly()
+		if err != nil {
+			return err
+		}
+		if _, ok := cfg.Get(contextOverride); !ok {
+			return fmt.Errorf("no context named %q", contextOverride)
+		}
 	}
 
 	// Redirect authbridge's logging to the logfile before anything that logs
@@ -1271,10 +1289,10 @@ func init() {
 
 	authbridgeCmd := newGroup("authbridge", "Run commands behind an AuthBridge pipeline")
 
-	// exec resolves a cortex-typed context (see resolveCortexContext), which is
-	// named by --cortex. That flag lives on the cortex group, so authbridge
-	// registers its own copy rather than inheriting one: both bind the same
-	// cortexName variable, so the two groups behave identically.
+	// --cortex is retained only so existing invocations still parse: exec is
+	// configured by --config and no longer resolves a context at all, so the
+	// flag now has no effect whatsoever. It stays bound to the same cortexName
+	// variable as the cortex group's copy.
 	authbridgeCmd.PersistentFlags().StringVar(&cortexName, "cortex", defaultCortexName,
 		"name of the cortex to operate on")
 	// Deprecated: authbridge exec is configured by --config, not by a cortex.

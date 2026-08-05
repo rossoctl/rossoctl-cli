@@ -203,17 +203,67 @@ func TestAuthbridgeCortexFlagDeprecated(t *testing.T) {
 		t.Error("a deprecated --cortex should be hidden from help")
 	}
 
-	// Deprecated must not mean rejected: the flag still parses and still names
-	// the context exec resolves.
+	// Deprecated must not mean rejected: the flag still parses and the command
+	// still runs. It no longer has any effect, though — exec does not resolve a
+	// context, so the named one is not created.
 	isolateHome(t)
 	cfg := writeConfig(t, pipelineOnlyConfig(t))
 	if _, code := execExitCode(t, "authbridge", "exec", "--cortex", "depctx",
 		"--config", cfg, "--", "true"); code != 0 {
 		t.Fatalf("deprecated --cortex should still work: exit %d", code)
 	}
-	if _, ok := loadTestConfig(t).Get("depctx"); !ok {
-		t.Error("--cortex should still select/create its context")
+	if _, ok := loadTestConfig(t).Get("depctx"); ok {
+		t.Error("--cortex should no longer create a context: exec must not touch the context config")
 	}
+}
+
+// TestAuthbridgeExecLeavesContextAlone is the regression test for exec's context
+// independence. exec is configured entirely by --config, so hosting a command
+// behind a pipeline must not create a context, switch the current one, or even
+// bring the config file into existence — it previously did all three via
+// resolveCortexContext, silently repointing every later rossoctl invocation.
+func TestAuthbridgeExecLeavesContextAlone(t *testing.T) {
+	t.Run("no config file is created", func(t *testing.T) {
+		path := isolateHome(t)
+		cfg := writeConfig(t, pipelineOnlyConfig(t))
+
+		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
+			t.Fatalf("exec failed: exit %d", code)
+		}
+
+		// The context config must not be brought into existence at all.
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("exec created %s; it should not touch the context config (stat err: %v)", path, err)
+		}
+	})
+
+	t.Run("the current context is preserved", func(t *testing.T) {
+		isolateHome(t)
+
+		// Establish a known current context, then confirm exec leaves it as-is.
+		if _, err := execute(t, "config", "create-context",
+			"--name", "mine", "--server", "http://mine/api/v1/"); err != nil {
+			t.Fatalf("create-context: %v", err)
+		}
+		before := loadTestConfig(t)
+		wantCurrent := before.CurrentContext
+		wantCount := len(before.Contexts)
+
+		cfg := writeConfig(t, pipelineOnlyConfig(t))
+		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
+			t.Fatalf("exec failed: exit %d", code)
+		}
+
+		after := loadTestConfig(t)
+		if after.CurrentContext != wantCurrent {
+			t.Errorf("current context = %q, want %q; exec must not switch contexts",
+				after.CurrentContext, wantCurrent)
+		}
+		if len(after.Contexts) != wantCount {
+			t.Errorf("context count = %d, want %d; exec must not add a context",
+				len(after.Contexts), wantCount)
+		}
+	})
 }
 
 // TestAuthbridgeSessionServerOverride covers --sessionServer: unset leaves the
@@ -1289,29 +1339,27 @@ func TestCortexExecStdinPassThrough(t *testing.T) {
 	}
 }
 
-// TestCortexExecResolvesCortexContext verifies exec goes through the same
-// context resolution as the other cortex commands: --cortex names the context,
-// and it is created when absent.
-func TestCortexExecResolvesCortexContext(t *testing.T) {
-	isolateHome(t)
+// TestCortexExecDoesNotCreateCortexContext verifies exec no longer goes through
+// cortex context resolution: --cortex is accepted but inert, so the context it
+// names is not created. See TestAuthbridgeExecLeavesContextAlone for the broader
+// guarantee this is part of.
+func TestCortexExecDoesNotCreateCortexContext(t *testing.T) {
+	path := isolateHome(t)
 	cfg := writeConfig(t, pipelineOnlyConfig(t))
 
 	if _, code := execExitCode(t, "authbridge", "exec", "--cortex", "execctx", "--config", cfg, "--", "true"); code != 0 {
-		t.Fatalf("authbridge exec --authbridge execctx: exit %d", code)
+		t.Fatalf("authbridge exec --cortex execctx: exit %d", code)
 	}
 
-	c := loadTestConfig(t)
-	ctx, ok := c.Get("execctx")
-	if !ok {
-		t.Fatal(`expected a context named "execctx" to be created`)
-	}
-	if ctx.Type != "cortex" {
-		t.Errorf("context type = %q, want %q", ctx.Type, "cortex")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("exec created %s; it should not touch the context config (stat err: %v)", path, err)
 	}
 }
 
 // TestCortexExecContextOverrideMustExist verifies that --context naming an
-// unknown context errors before the command runs.
+// unknown context errors before the command runs. exec ignores the context, but
+// an explicit --context that does not resolve is a typo worth reporting rather
+// than silently accepting.
 func TestCortexExecContextOverrideMustExist(t *testing.T) {
 	isolateHome(t)
 	cfg := writeConfig(t, pipelineOnlyConfig(t))
@@ -1323,6 +1371,34 @@ func TestCortexExecContextOverrideMustExist(t *testing.T) {
 	var exitErr *exitCodeError
 	if errors.As(err, &exitErr) {
 		t.Errorf("the command should not have run: %v", err)
+	}
+}
+
+// TestCortexExecContextOverrideCreatesNothing verifies that validating an
+// existing --context stays read-only: naming a real context must not make it
+// current or otherwise rewrite the config.
+func TestCortexExecContextOverrideCreatesNothing(t *testing.T) {
+	isolateHome(t)
+
+	// Two contexts, with "other" current, so a switch to "mine" would show.
+	if _, err := execute(t, "config", "create-context", "--name", "mine", "--server", "http://mine/"); err != nil {
+		t.Fatalf("create-context mine: %v", err)
+	}
+	if _, err := execute(t, "config", "create-context", "--name", "other", "--server", "http://other/"); err != nil {
+		t.Fatalf("create-context other: %v", err)
+	}
+	if _, err := execute(t, "config", "use-context", "other"); err != nil {
+		t.Fatalf("use-context other: %v", err)
+	}
+
+	cfg := writeConfig(t, pipelineOnlyConfig(t))
+	if _, code := execExitCode(t, "authbridge", "exec", "--context", "mine",
+		"--config", cfg, "--", "true"); code != 0 {
+		t.Fatalf("exec with --context mine: exit %d", code)
+	}
+
+	if got := loadTestConfig(t).CurrentContext; got != "other" {
+		t.Errorf("current context = %q, want %q; --context must not switch the current context", got, "other")
 	}
 }
 
