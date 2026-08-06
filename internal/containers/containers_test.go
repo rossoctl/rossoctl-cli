@@ -54,9 +54,9 @@ func (f *fakeRun) argsFor(t *testing.T, sub string) []string {
 // that a flag and its value are adjacent rather than merely both present.
 func joined(args []string) string { return strings.Join(args, " ") }
 
-// TestStartBuildsRunCommand verifies the run command carries the detached and
-// auto-remove flags, one -p per published port, the mounts, and the container's
-// own arguments after the image.
+// TestStartBuildsRunCommand verifies the run command carries the detached flag
+// (but not --rm), one -p per published port, the mounts, and the container's own
+// arguments after the image.
 func TestStartBuildsRunCommand(t *testing.T) {
 	f := &fakeRun{replies: map[string]string{"run": "abc123def4567890\n"}}
 	e := engineWith(f)
@@ -68,8 +68,9 @@ func TestStartBuildsRunCommand(t *testing.T) {
 			{HostPath: "/host/config.yaml", ContainerPath: "/tmp/config.yaml", ReadOnly: true},
 			{HostPath: "/host/ca", ContainerPath: "/etc/ca"},
 		},
-		Env:  []string{"LOG_LEVEL=debug"},
-		Args: []string{"--config", "/tmp/config.yaml"},
+		HostEntries: []HostEntry{{Name: "keycloak.localtest.me", Address: HostGateway}},
+		Env:         []string{"LOG_LEVEL=debug"},
+		Args:        []string{"--config", "/tmp/config.yaml"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -80,11 +81,12 @@ func TestStartBuildsRunCommand(t *testing.T) {
 
 	got := joined(f.argsFor(t, "run"))
 	for _, want := range []string{
-		"run -d --rm",
+		"run -d",
 		"-p 8080",
 		"-p 9094",
 		"-v /host/config.yaml:/tmp/config.yaml:ro",
 		"-v /host/ca:/etc/ca",
+		"--add-host keycloak.localtest.me:host-gateway",
 		"-e LOG_LEVEL=debug",
 		// The image must precede the container's own args, or they would be
 		// parsed as flags of the runtime's.
@@ -93,6 +95,56 @@ func TestStartBuildsRunCommand(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("run args %q missing %q", got, want)
 		}
+	}
+
+	// Explicitly not --rm: an exited container must survive so its logs can be
+	// read, and Stop removes it instead. Checked as a negative because "run -d"
+	// above is a substring of "run -d --rm" and would not catch a regression.
+	if strings.Contains(got, "--rm") {
+		t.Errorf("run args %q must not use --rm: it reaps a crashed container and its logs", got)
+	}
+}
+
+// TestStartHostEntries verifies each host entry becomes its own --add-host, in
+// the order given, and that an entry's name and address are joined with a colon.
+func TestStartHostEntries(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "abc123\n"}}
+	_, err := engineWith(f).Start(context.Background(), RunSpec{
+		Image: "example/proxy:v1",
+		HostEntries: []HostEntry{
+			{Name: "keycloak.localtest.me", Address: HostGateway},
+			{Name: "api.internal", Address: "10.0.0.7"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// One flag per entry rather than one flag with a joined value: --add-host
+	// takes a single mapping, so a combined value would be parsed as one absurd
+	// hostname.
+	got := joined(f.argsFor(t, "run"))
+	want := "--add-host keycloak.localtest.me:host-gateway --add-host api.internal:10.0.0.7"
+	if !strings.Contains(got, want) {
+		t.Errorf("run args %q missing %q", got, want)
+	}
+
+	// Before the image, or the runtime would treat them as the container's own
+	// arguments instead of its flags.
+	if strings.Index(got, "--add-host") > strings.Index(got, "example/proxy:v1") {
+		t.Errorf("run args %q put --add-host after the image", got)
+	}
+}
+
+// TestStartNoHostEntries verifies no --add-host appears when none were asked
+// for, so the common case does not make a claim about name resolution.
+func TestStartNoHostEntries(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "abc123\n"}}
+	if _, err := engineWith(f).Start(context.Background(), RunSpec{Image: "example/proxy:v1"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := joined(f.argsFor(t, "run")); strings.Contains(got, "--add-host") {
+		t.Errorf("run args %q added a host entry when none was requested", got)
 	}
 }
 
@@ -225,7 +277,7 @@ func TestStopPassesTimeout(t *testing.T) {
 
 // TestStopAbsentContainerIsNotAnError verifies that stopping a container which is
 // already gone succeeds: the postcondition is that it is not running, and it is
-// not. A container run with --rm that exited on its own hits this every time.
+// not. A container someone removed by hand between Start and Stop hits this.
 func TestStopAbsentContainerIsNotAnError(t *testing.T) {
 	for _, msg := range []string{
 		"Error response from daemon: No such container: abc123",
@@ -353,5 +405,300 @@ func TestLastLine(t *testing.T) {
 		if got := lastLine(tc.in); got != tc.want {
 			t.Errorf("lastLine(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestExecLogsCommandLine covers the --verbose command-line logging: every
+// runtime invocation is logged, in order, and the line names the binary and its
+// arguments so it can be rerun by hand.
+func TestExecLogsCommandLine(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{
+		"run":     "container-id\n",
+		"inspect": `{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"32770"}]}`,
+	}}
+	e := engineWith(f)
+
+	var logs []string
+	SetLogf(e, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+
+	if _, err := e.Start(context.Background(), RunSpec{Image: "img:latest"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := e.Inspect(context.Background(), "container-id"); err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+
+	if len(logs) != 2 {
+		t.Fatalf("expected one log line per invocation, got %d: %v", len(logs), logs)
+	}
+	if !strings.HasPrefix(logs[0], "docker run ") {
+		t.Errorf("run log = %q, want it to start with the binary and subcommand", logs[0])
+	}
+	if !strings.Contains(logs[0], "img:latest") {
+		t.Errorf("run log = %q, want it to name the image", logs[0])
+	}
+	if !strings.HasPrefix(logs[1], "docker inspect ") {
+		t.Errorf("inspect log = %q, want it to start with the binary and subcommand", logs[1])
+	}
+}
+
+// TestExecLogsBeforeRunning verifies the command line is logged before the
+// runtime is invoked, not after. A command that hangs or fails is exactly when
+// seeing it matters, so logging must not depend on the call returning.
+func TestExecLogsBeforeRunning(t *testing.T) {
+	var logged bool
+	e := &cliEngine{
+		bin: "docker",
+		run: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+			if !logged {
+				t.Error("the command line was not logged before the runtime ran")
+			}
+			return nil, errors.New("boom")
+		},
+		logf: func(string, ...any) { logged = true },
+	}
+
+	// The error is the fake's, and is expected; the assertion is inside run.
+	if _, err := e.exec(context.Background(), "run", "img"); err == nil {
+		t.Fatal("expected the fake runtime's error")
+	}
+	if !logged {
+		t.Error("nothing was logged")
+	}
+}
+
+// TestExecNilLogfIsSafe verifies the quiet path: with no logf set (the default,
+// and what a non-verbose run leaves it as) exec must not panic.
+func TestExecNilLogfIsSafe(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "cid\n"}}
+	e := engineWith(f) // logf nil
+	if _, err := e.Start(context.Background(), RunSpec{Image: "img"}); err != nil {
+		t.Fatalf("unexpected error with nil logf: %v", err)
+	}
+}
+
+// TestSetLogfNilDisables verifies SetLogf(nil) turns logging back off rather than
+// installing a nil function that exec would then call.
+func TestSetLogfNilDisables(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "cid\n"}}
+	e := engineWith(f)
+
+	var count int
+	SetLogf(e, func(string, ...any) { count++ })
+	SetLogf(e, nil)
+
+	if _, err := e.Start(context.Background(), RunSpec{Image: "img"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("logged %d times after SetLogf(nil), want 0", count)
+	}
+}
+
+// TestSetLogfOnForeignEngineIsSafe verifies SetLogf ignores an Engine it does not
+// know, rather than panicking. It takes the interface, so anything can be passed.
+func TestSetLogfOnForeignEngineIsSafe(t *testing.T) {
+	SetLogf(nil, func(string, ...any) {})
+	SetLogf(otherEngine{}, func(string, ...any) {})
+}
+
+// otherEngine is an Engine that does not shell out, for the SetLogf guard above.
+type otherEngine struct{}
+
+func (otherEngine) Start(context.Context, RunSpec) (string, error) { return "", nil }
+func (otherEngine) Stop(context.Context, string) error             { return nil }
+func (otherEngine) Inspect(context.Context, string) (map[string][]PortBinding, error) {
+	return nil, nil
+}
+
+// TestCommandLineQuoting covers the shell quoting. The logged line is meant to be
+// pasteable, and Inspect really does pass a --format template whose braces and
+// space a shell would mangle.
+func TestCommandLineQuoting(t *testing.T) {
+	tests := []struct {
+		name string
+		bin  string
+		args []string
+		want string
+	}{
+		{
+			name: "plain arguments are not quoted",
+			bin:  "docker",
+			args: []string{"run", "-d", "img:latest"},
+			want: "docker run -d img:latest",
+		},
+		{
+			name: "a format template is quoted",
+			bin:  "docker",
+			args: []string{"inspect", "--format", "{{json .NetworkSettings.Ports}}", "cid"},
+			want: `docker inspect --format '{{json .NetworkSettings.Ports}}' cid`,
+		},
+		{
+			name: "a path with a space is quoted",
+			bin:  "/usr/local/bin/podman",
+			args: []string{"run", "-v", "/home/My Files/cfg.yaml:/tmp/config.yaml:ro", "img"},
+			want: `/usr/local/bin/podman run -v '/home/My Files/cfg.yaml:/tmp/config.yaml:ro' img`,
+		},
+		{
+			name: "an embedded single quote is spliced",
+			bin:  "docker",
+			args: []string{"run", "-e", "MSG=it's"},
+			want: `docker run -e 'MSG=it'\''s'`,
+		},
+		{
+			name: "an empty argument is visible",
+			bin:  "docker",
+			args: []string{"run", "-e", ""},
+			want: "docker run -e ''",
+		},
+		{
+			name: "common punctuation stays unquoted",
+			bin:  "docker",
+			args: []string{"run", "-p", "127.0.0.1:0:8080/tcp", "--name=a_b-c.d", "img@sha256:abc"},
+			want: "docker run -p 127.0.0.1:0:8080/tcp --name=a_b-c.d img@sha256:abc",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commandLine(tc.bin, tc.args); got != tc.want {
+				t.Errorf("commandLine() =\n  %s\nwant\n  %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecLogsPercentLiterally verifies an argument containing a % survives
+// logging. The sink is Printf-style, so passing the line as a format string would
+// turn a --format template's % into a bogus verb.
+func TestExecLogsPercentLiterally(t *testing.T) {
+	var got string
+	e := &cliEngine{
+		bin: "docker",
+		run: func(_ context.Context, _ string, _ ...string) ([]byte, error) { return nil, nil },
+		// Mirror cmd's sink, which formats before writing.
+		logf: func(format string, args ...any) { got = fmt.Sprintf(format, args...) },
+	}
+	if _, err := e.exec(context.Background(), "inspect", "--format", "100%_{{.Id}}"); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.Contains(got, "100%_") {
+		t.Errorf("logged %q, want it to contain the literal %%", got)
+	}
+	if strings.Contains(got, "%!") {
+		t.Errorf("logged %q, want no Printf verb errors", got)
+	}
+}
+
+// TestStopRemovesContainer verifies Stop removes the container after stopping it.
+// The run does not use --rm, so an exited container persists to hold its logs;
+// removal here is what keeps that from leaking a dead container per run.
+func TestStopRemovesContainer(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{
+		"stop": "abc123\n",
+		"rm":   "abc123\n",
+	}}
+
+	if err := engineWith(f).Stop(context.Background(), "abc123"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if got, want := joined(f.argsFor(t, "rm")), "rm -f abc123"; got != want {
+		t.Errorf("rm args = %q, want %q", got, want)
+	}
+
+	// Order matters: removing before stopping would kill the container without
+	// giving it StopTimeout to shut down gracefully.
+	var stopAt, rmAt = -1, -1
+	for i, c := range f.calls {
+		switch c[0] {
+		case "stop":
+			stopAt = i
+		case "rm":
+			rmAt = i
+		}
+	}
+	if stopAt < 0 || rmAt < 0 {
+		t.Fatalf("expected both a stop and an rm, got calls %v", f.calls)
+	}
+	if stopAt > rmAt {
+		t.Errorf("rm ran before stop (calls %v); stop must come first", f.calls)
+	}
+}
+
+// TestStopRemovesAfterFailedStop verifies the remove still happens when the stop
+// fails. The likeliest reason for a stop to fail is that the container already
+// exited — precisely the crashed-container case that leaves an artifact behind —
+// so skipping the remove there would leak exactly what it must clean up.
+func TestStopRemovesAfterFailedStop(t *testing.T) {
+	f := &fakeRun{
+		replies: map[string]string{
+			"stop": "Error response from daemon: cannot stop container",
+			"rm":   "abc123\n",
+		},
+		errs: map[string]error{"stop": errors.New("exit status 1")},
+	}
+
+	// The stop failure is still reported: it is the more meaningful error.
+	if err := engineWith(f).Stop(context.Background(), "abc123"); err == nil {
+		t.Error("expected the stop failure to be reported")
+	}
+	// But the container was removed anyway.
+	if got, want := joined(f.argsFor(t, "rm")), "rm -f abc123"; got != want {
+		t.Errorf("rm args = %q, want %q", got, want)
+	}
+}
+
+// TestStopAbsentContainerSkipsRemove verifies that a container already gone needs
+// no remove: there is nothing to clean up, so Stop returns without a second call.
+func TestStopAbsentContainerSkipsRemove(t *testing.T) {
+	f := &fakeRun{
+		replies: map[string]string{"stop": "Error response from daemon: No such container: abc123"},
+		errs:    map[string]error{"stop": errors.New("exit status 1")},
+	}
+
+	if err := engineWith(f).Stop(context.Background(), "abc123"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	for _, c := range f.calls {
+		if c[0] == "rm" {
+			t.Errorf("removed an already-absent container: calls %v", f.calls)
+		}
+	}
+}
+
+// TestStopToleratesAbsentOnRemove verifies Stop succeeds when the container
+// disappears between the stop and the remove. Something else reaping it achieves
+// the same postcondition, so it is not a failure.
+func TestStopToleratesAbsentOnRemove(t *testing.T) {
+	for _, msg := range []string{
+		"Error response from daemon: No such container: abc123",
+		"Error: no container with name or ID \"abc123\" found",
+	} {
+		f := &fakeRun{
+			replies: map[string]string{"stop": "abc123\n", "rm": msg},
+			errs:    map[string]error{"rm": errors.New("exit status 1")},
+		}
+		if err := engineWith(f).Stop(context.Background(), "abc123"); err != nil {
+			t.Errorf("Stop with rm reporting %q = %v, want nil", msg, err)
+		}
+	}
+}
+
+// TestStopReportsRemoveFailure verifies a real remove failure is not swallowed. A
+// container that stopped but could not be removed is a leak the caller should
+// hear about, since nothing else will clean it up.
+func TestStopReportsRemoveFailure(t *testing.T) {
+	f := &fakeRun{
+		replies: map[string]string{
+			"stop": "abc123\n",
+			"rm":   "permission denied while trying to connect to the Docker daemon",
+		},
+		errs: map[string]error{"rm": errors.New("exit status 1")},
+	}
+	if err := engineWith(f).Stop(context.Background(), "abc123"); err == nil {
+		t.Fatal("expected a real remove failure to be reported")
 	}
 }

@@ -54,6 +54,13 @@ type RunSpec struct {
 	// Mounts are host->container bind mounts.
 	Mounts []Mount
 
+	// HostEntries are extra name->address entries for the container's
+	// /etc/hosts, the `--add-host` form. They exist because a name that resolves
+	// on this host does not necessarily resolve inside the container: a service
+	// reachable at a *.localtest.me name on the host is on the host's loopback,
+	// which inside the container is the container itself.
+	HostEntries []HostEntry
+
 	// Env are environment variables to set in the container, "K=V".
 	Env []string
 
@@ -76,6 +83,28 @@ type Mount struct {
 	ReadOnly bool
 }
 
+// HostEntry is one extra /etc/hosts entry for a container.
+type HostEntry struct {
+	// Name is the hostname to resolve inside the container. Required.
+	Name string
+
+	// Address is what it resolves to. Required. Besides an IP, both docker and
+	// podman accept the literal "host-gateway", which resolves to the host
+	// itself — the portable way to reach a service on the host, since the host's
+	// address differs by platform and network mode.
+	Address string
+}
+
+// arg renders the entry as an --add-host value.
+func (h HostEntry) arg() string {
+	return h.Name + ":" + h.Address
+}
+
+// HostGateway is the address that resolves to the container's host. It is a
+// literal both runtimes special-case rather than an address, so it works
+// wherever the host's own IP is not knowable up front.
+const HostGateway = "host-gateway"
+
 // Engine starts, stops, and inspects containers.
 //
 // Implementations are safe for sequential use by one caller; they hold no state
@@ -85,11 +114,22 @@ type Engine interface {
 	// container is running when Start returns — but its entrypoint may still be
 	// initializing, so a caller that needs readiness must wait for a signal of
 	// its own (a published port answering, a file appearing).
+	//
+	// The container outlives its own process: if it exits or crashes it stays in
+	// the exited state, holding its logs, until Stop removes it. Every successful
+	// Start therefore needs a matching Stop, or an exited container is left
+	// behind.
 	Start(ctx context.Context, spec RunSpec) (string, error)
 
 	// Stop stops the container, giving it StopTimeout to exit before it is
-	// killed. Stopping an already-stopped or absent container is not an error:
-	// the goal is that it is not running, and it is not.
+	// killed, and then removes it. Stopping an already-stopped or absent
+	// container is not an error: the goal is that it is not running, and it is
+	// not.
+	//
+	// Removal is Stop's job rather than the runtime's because the container is
+	// not started with --rm: one that crashes stays around so its logs can still
+	// be read, until the caller says it is done by calling Stop. A caller that
+	// wants the logs must therefore read them before calling Stop.
 	Stop(ctx context.Context, id string) error
 
 	// Inspect returns the container's published port bindings, keyed by the
@@ -109,6 +149,23 @@ type cliEngine struct {
 	// run executes a command and returns its combined output. It is a field so
 	// tests can substitute a fake runtime; nil means really execute.
 	run func(ctx context.Context, bin string, args ...string) ([]byte, error)
+
+	// logf, when non-nil, is called with the command line before each runtime
+	// invocation. nil means log nothing, so the quiet path costs a nil check.
+	logf func(format string, args ...any)
+}
+
+// SetLogf makes engine log the command line of every runtime invocation, which
+// is what --verbose wants: the exact docker/podman command, so it can be rerun by
+// hand. Passing nil turns logging back off.
+//
+// This is a setter rather than an exported field because Detect and NewCLIEngine
+// return the Engine interface, so a caller holding one cannot reach a field on
+// the concrete type. Engines that do not shell out ignore it.
+func SetLogf(engine Engine, logf func(format string, args ...any)) {
+	if e, ok := engine.(*cliEngine); ok {
+		e.logf = logf
+	}
 }
 
 // NewCLIEngine returns an Engine backed by the container CLI named by bin
@@ -143,7 +200,17 @@ func Detect() (engine Engine, bin string, err error) {
 // exec runs the runtime with args, returning its combined output. Combined
 // rather than just stdout because a runtime's diagnostics go to stderr, and on
 // failure that text is the only useful part of the error.
+//
+// The command line is logged through logf first when one is set. It is logged
+// before the call, not after, so a command that hangs or is killed still shows
+// what was being run — the case where seeing it matters most.
 func (e *cliEngine) exec(ctx context.Context, args ...string) ([]byte, error) {
+	if e.logf != nil {
+		// Logged as a single pre-formatted argument: an arg containing a % (a
+		// --format template, say) would otherwise be read as a verb by the
+		// caller's Printf-style sink and render as %!s(MISSING).
+		e.logf("%s", commandLine(e.bin, args))
+	}
 	if e.run != nil {
 		return e.run(ctx, e.bin, args...)
 	}
@@ -160,16 +227,58 @@ func (e *cliEngine) exec(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// commandLine renders a runtime invocation as a single line that can be pasted
+// back into a shell.
+//
+// Arguments are quoted only when they need it. Inspect passes a --format
+// template ("{{json .NetworkSettings.Ports}}") whose braces and space would be
+// mangled by a shell, and a bind mount's host path can contain spaces, so a plain
+// space-join would print a line that does not rerun. Single quotes are used
+// because they suppress every shell expansion; an embedded single quote is
+// spliced out of the quoted run, escaped, and back in (see shellQuote).
+func commandLine(bin string, args []string) string {
+	quoted := make([]string, 0, len(args)+1)
+	quoted = append(quoted, shellQuote(bin))
+	for _, a := range args {
+		quoted = append(quoted, shellQuote(a))
+	}
+	return strings.Join(quoted, " ")
+}
+
+// shellQuote returns s quoted for a POSIX shell if it contains anything outside
+// a conservative safe set, and unchanged otherwise.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return false
+		}
+		return !strings.ContainsRune("-_./:=@,+", r)
+	}) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Start implements Engine.
 func (e *cliEngine) Start(ctx context.Context, spec RunSpec) (string, error) {
 	if spec.Image == "" {
 		return "", fmt.Errorf("container image is required")
 	}
 
-	// --rm so a container that exits does not linger as a dead artifact the
-	// operator has to clean up by hand; -d so Start returns rather than
-	// blocking on the container's lifetime.
-	args := []string{"run", "-d", "--rm"}
+	// -d so Start returns rather than blocking on the container's lifetime.
+	//
+	// Deliberately not --rm. With it, a container that crashed was reaped by the
+	// runtime the instant it exited, taking `docker logs` with it — so the one
+	// case where the logs matter most was the case where they were already gone,
+	// and a crash was indistinguishable from a container that never started. The
+	// container is now removed by Stop instead, which is the caller's signal that
+	// it is finished with it. The cost is that a caller who never reaches Stop
+	// (SIGKILL, a panic) leaves an exited container behind.
+	args := []string{"run", "-d"}
 	if spec.Name != "" {
 		args = append(args, "--name", spec.Name)
 	}
@@ -178,6 +287,9 @@ func (e *cliEngine) Start(ctx context.Context, spec RunSpec) (string, error) {
 		// which is the point: the host side is discovered with Inspect instead
 		// of being hardcoded and risking a collision.
 		args = append(args, "-p", strconv.Itoa(p))
+	}
+	for _, h := range spec.HostEntries {
+		args = append(args, "--add-host", h.arg())
 	}
 	for _, m := range spec.Mounts {
 		args = append(args, "-v", m.arg())
@@ -229,17 +341,30 @@ func (e *cliEngine) Stop(ctx context.Context, id string) error {
 	defer cancel()
 
 	seconds := strconv.Itoa(int(StopTimeout.Seconds()))
-	out, err := e.exec(stopCtx, "stop", "-t", seconds, id)
-	if err != nil {
-		// A container that is already gone satisfies the postcondition. This is
-		// the common case when the container ran with --rm and its process
-		// exited on its own.
-		if isNoSuchContainer(string(out)) {
-			return nil
-		}
-		return err
+	out, stopErr := e.exec(stopCtx, "stop", "-t", seconds, id)
+	if stopErr != nil && isNoSuchContainer(string(out)) {
+		// Already gone, so there is nothing to stop and nothing to remove. This
+		// is not an error: the postcondition is that it is not running.
+		return nil
 	}
-	return nil
+
+	// Remove the container whether or not the stop succeeded. Because the run
+	// does not use --rm, an exited container persists so its logs can be read;
+	// removing it here is what keeps that from becoming a leak. It has to run
+	// even on stop failure, since the most likely reason to fail is that the
+	// container already exited — exactly the case that leaves an artifact behind.
+	rmOut, rmErr := e.exec(stopCtx, "rm", "-f", id)
+	if rmErr != nil && isNoSuchContainer(string(rmOut)) {
+		rmErr = nil
+	}
+
+	// The stop error is reported in preference to the remove error: it describes
+	// the container failing to shut down, which is the more meaningful failure,
+	// and a remove that fails after it is usually a consequence.
+	if stopErr != nil {
+		return stopErr
+	}
+	return rmErr
 }
 
 // isNoSuchContainer reports whether a runtime's error output means the container

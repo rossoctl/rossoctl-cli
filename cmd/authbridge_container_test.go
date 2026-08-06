@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+
+	"github.com/rossoctl/rossoctl-cli/internal/containers"
 )
 
 // TestContainerCADir verifies which configs get a host CA directory mounted in.
@@ -153,5 +155,24 @@ func TestShortID(t *testing.T) {
 		if got := shortID(tc.in); got != tc.want {
 			t.Errorf("shortID(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestProxyContainerHostEntries verifies the proxy container gets a host entry
+// mapping Keycloak's local name to the host.
+//
+// The address must be host-gateway, not a loopback literal: *.localtest.me
+// already resolves to 127.0.0.1, and inside a container that is the container,
+// so mapping the name to loopback would be a no-op that still fails to reach the
+// host's Keycloak.
+func TestProxyContainerHostEntries(t *testing.T) {
+	entries := proxyContainerHostEntries()
+
+	want := containers.HostEntry{Name: "keycloak.localtest.me", Address: containers.HostGateway}
+	if len(entries) != 1 || entries[0] != want {
+		t.Fatalf("proxyContainerHostEntries() = %+v, want exactly %+v", entries, want)
+	}
+	if entries[0].Address == "127.0.0.1" || entries[0].Address == "localhost" {
+		t.Errorf("address %q points at the container itself, not the host", entries[0].Address)
 	}
 }

@@ -164,7 +164,7 @@ command sends its own traffic.
 
 With --proxyContainerImage the pipeline runs in a container from that image
 instead of in this process. The config is mounted read-only at /tmp/config.yaml
-and passed as --config; ports 8080, 8081, 9093, and 9094 are published on
+and passed as --config; ports 8000, 8081, 9093, and 9094 are published on
 ephemeral host ports, discovered after startup, and the proxy variables point at
 the host port for 8081. When the config's tls_bridge generates its own CA, a
 temporary directory is mounted at tls_bridge.ca_dir to receive it, exec waits up

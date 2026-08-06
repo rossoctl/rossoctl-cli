@@ -19,12 +19,14 @@ import (
 // own fixed ports; each is published on an ephemeral host port, and the host
 // side is discovered with Inspect rather than assumed.
 //
-// TODO: derive the forward proxy's container port from the port in the config's
-// listener.forward_proxy_addr instead of always using 8081. The image listens
-// wherever that address says, so a config naming another port would leave the
-// child pointed at a port nothing is on.
+// TODO: derive these from the config's listener addresses instead of hardcoding
+// them — the reverse port from listener.reverse_proxy_addr and the forward proxy
+// port from listener.forward_proxy_addr. The image listens wherever those
+// addresses say, so a config naming other ports publishes the wrong ones: the
+// reverse port would be published on nothing, and the child would be pointed at
+// a forward proxy port nothing is on.
 const (
-	containerReversePort      = 8080
+	containerReversePort      = 8000
 	containerForwardProxyPort = 8081
 	containerAdminPort        = 9093
 	containerSessionAPIPort   = 9094
@@ -83,6 +85,11 @@ func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, i
 	}
 	if verbose {
 		fmt.Fprintf(errOut, "using container runtime %s\n", bin)
+		// Log each runtime invocation to stderr, so verbose output stays clear of
+		// whatever the hosted command writes to stdout.
+		containers.SetLogf(engine, func(format string, args ...any) {
+			fmt.Fprintf(errOut, format+"\n", args...)
+		})
 	}
 
 	pc, err := runProxyContainer(cmd, engine, cfg, cfgPath, image)
@@ -198,6 +205,7 @@ func runProxyContainer(
 		Image:        image,
 		PublishPorts: []int{containerReversePort, containerForwardProxyPort, containerAdminPort, containerSessionAPIPort},
 		Mounts:       mounts,
+		HostEntries:  proxyContainerHostEntries(),
 		Args:         []string{"--config", containerConfigPath},
 	})
 	if err != nil {
@@ -212,8 +220,32 @@ func runProxyContainer(
 	return pc, nil
 }
 
-// stopAuthbridgeContainer stops the container started by
-// startAuthbridgeContainer and removes its temp CA directory.
+// proxyContainerHostEntries returns the extra /etc/hosts entries the proxy
+// container needs.
+//
+// keycloak.localtest.me is mapped to the host because *.localtest.me resolves to
+// 127.0.0.1, which inside a container is the container itself — so a pipeline
+// configured against a Keycloak on this host (the jwt-validation and
+// token-exchange plugins both reach one) would otherwise try to connect to
+// itself and fail. host-gateway is the runtimes' portable name for the host.
+//
+// TODO: this is hardcoded to the local demo's Keycloak rather than derived from
+// the config, so a pipeline pointing at some other host-local name gets no entry,
+// and a --add-host is passed even when nothing needs it (harmless, but it is a
+// claim about the environment that may be false). The names are knowable: the
+// plugin configs carry keycloak_url and issuer.
+func proxyContainerHostEntries() []containers.HostEntry {
+	return []containers.HostEntry{
+		{Name: "keycloak.localtest.me", Address: containers.HostGateway},
+	}
+}
+
+// stopAuthbridgeContainer stops and removes the container started by
+// startAuthbridgeContainer, and removes its temp CA directory.
+//
+// Stopping is also what deletes the container: it is not run with --rm, so one
+// that crashed stays around holding its logs until here. Anything wanting to
+// report those logs must therefore do it before this runs.
 //
 // Failures are reported but do not change the command's exit status: the child
 // has already run, and its status is what the operator asked for. The CA
