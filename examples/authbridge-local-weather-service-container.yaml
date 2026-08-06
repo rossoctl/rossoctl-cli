@@ -1,0 +1,78 @@
+# AuthBridge config for the weather demo — container variant.
+#
+# The weather service runs as the hosted command, with authbridge on both sides
+# of it: callers come in through the reverse proxy, and the service's own calls
+# to other APIs go out through the forward proxy. Unlike the non-container
+# sibling, the pipeline itself runs in a container and the service stays on the
+# host, which is what the addresses below are shaped around.
+#
+# To run
+# ```bash
+# rossoctl authbridge exec --proxyContainerImage authbridge:local \
+#   --config examples/authbridge-local-weather-service-container.yaml \
+#   -- uv run --no-sync server
+# ```
+#
+# While the weather service is running, in another window, do
+# ```bash
+# tail -f /tmp/authbridge.log
+# ```
+#
+# The reverse proxy is published on an ephemeral host port, not on 8000: the
+# container's 8000 is mapped to whatever the runtime picked. Run with --verbose
+# to see the mapping, then send requests there rather than straight to :8001 —
+# going straight to the service bypasses JWT validation entirely:
+# ```bash
+# curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:$HOST_PORT/
+# ```
+#
+# NOTE: mTLS is NOT enforced. `spiffe` and `mtls` are commented out below because
+# obtaining a SPIFFE identity blocks on the SPIRE workload API, which is absent
+# here; the listeners accept plaintext, and exec says so at startup.
+#
+listener:
+  # Where the weather service's own outbound traffic leaves through. exec sets
+  # HTTP_PROXY/HTTPS_PROXY to this for the hosted command.
+  forward_proxy_addr: :8081
+  # Where callers reach the service. Requests arriving here run the inbound
+  # pipeline (JWT validation) and are then forwarded to the backend below.
+  #
+  # 0.0.0.0, not :8000 as the host variant uses: bound inside the container, a
+  # loopback-only listener would be unreachable from the published port.
+  reverse_proxy_addr: 0.0.0.0:8000
+  # The weather service itself, which must listen here. It is deliberately not
+  # :8000 — that is authbridge's address, in front of it.
+  #
+  # host.docker.internal because the service runs on the host while the pipeline
+  # runs in the container, where 127.0.0.1 would be the container itself.
+  reverse_proxy_backend: http://host.docker.internal:8001
+mode: proxy-sidecar
+pipeline:
+  inbound:
+    plugins:
+    - config:
+        # The aud claim inbound tokens must carry: this service's SPIFFE ID.
+        # Setting it literally also keeps the plugin off its default of reading
+        # /shared/client-id.txt, which only exists when running under Rossoctl —
+        # locally that file is absent, so the plugin would start with its
+        # identity pending and reject every token with 503.
+        audience: spiffe://localtest.me/ns/team1/sa/weather-service
+        issuer: http://keycloak.localtest.me:8080/realms/rossoctl
+        keycloak_realm: rossoctl
+        keycloak_url: http://keycloak.localtest.me:8080/
+      name: jwt-validation
+  outbound:
+    plugins:
+    - config:
+        default_policy: passthrough
+        identity:
+          type: client-secret
+        keycloak_realm: rossoctl
+        keycloak_url: http://keycloak.localtest.me:8080/
+      name: token-exchange
+# Commented out, because outside of SPIFFE environment we can't read this
+# spiffe:
+#   socket: unix:///spiffe-workload-api/spire-agent.sock
+# Commented out, because mTLS requires the SPIFFE block
+# mtls:
+#   mode: permissive
