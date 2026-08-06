@@ -3,6 +3,7 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -606,5 +607,60 @@ func TestGetPlatformStatus(t *testing.T) {
 	}
 	if !status.Registry.ClusterBuildStrategyPresent || status.Registry.RegistryEndpoint != "r:5000" {
 		t.Errorf("unexpected registry: %+v", status.Registry)
+	}
+}
+
+// TestStatusErrorIsReturnedForNon2xx verifies a failing response yields a
+// *StatusError carrying the code, which is what lets the command layer suggest
+// signing in on a 401 without matching on message text.
+func TestStatusErrorIsReturnedForNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Token signing key not found"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/api/v1/"}
+	_, err := c.ListAgents(context.Background(), "team1")
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error %T is not a *StatusError; the command layer could not detect the 401", err)
+	}
+	if statusErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusUnauthorized)
+	}
+	if !strings.Contains(statusErr.Body, "Token signing key not found") {
+		t.Errorf("Body = %q, want the server's detail", statusErr.Body)
+	}
+
+	// The message is unchanged from the fmt.Errorf this replaced, so existing
+	// output stays as it was and the hint is purely additive.
+	want := fmt.Sprintf("%s/api/v1/agents?namespace=team1 returned 401: {\"detail\":\"Token signing key not found\"}", srv.URL)
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestStatusErrorUsesStatusLineWhenBodyEmpty verifies an empty body falls back to
+// the status line, so the error is never just a bare code with nothing after it.
+func TestStatusErrorUsesStatusLineWhenBodyEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/api/v1/"}
+	_, err := c.ListAgents(context.Background(), "team1")
+
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error %T is not a *StatusError", err)
+	}
+	if statusErr.Body == "" {
+		t.Error("Body is empty; want the status line as a fallback")
 	}
 }

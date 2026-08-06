@@ -10,6 +10,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -195,7 +196,34 @@ func Execute() {
 	}
 
 	fmt.Fprintln(os.Stderr, "Error:", err)
+	if hint := errorHint(err); hint != "" {
+		fmt.Fprintln(os.Stderr, hint)
+	}
 	os.Exit(1)
+}
+
+// errorHint returns a suggested next step for errors whose cause has an obvious
+// remedy, or "" when there is nothing useful to add.
+//
+// This lives at the single place every command's error is printed, rather than at
+// each call site: a 401 can come from any command that reaches the API, and
+// eleven files call one of these clients. Adding it here covers agents, tools,
+// status, envvars, and anything added later for free.
+func errorHint(err error) string {
+	var statusErr *apiclient.StatusError
+	if !errors.As(err, &statusErr) {
+		return ""
+	}
+
+	switch statusErr.StatusCode {
+	case http.StatusUnauthorized:
+		// Deliberately not suggested for 403: that is an authenticated
+		// identity lacking permission, where signing in again changes
+		// nothing and the advice would send the user in a circle.
+		return "Hint: the server rejected the credentials. Run `rossoctl login` to sign in."
+	default:
+		return ""
+	}
 }
 
 func init() {

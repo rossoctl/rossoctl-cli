@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 )
 
 // TestMain isolates HOME to a throwaway directory for the whole cmd test
@@ -241,6 +246,59 @@ func TestGroupsAreNotRunnable(t *testing.T) {
 			}
 			if !strings.Contains(out, "Available Commands") {
 				t.Errorf("%s output = %q, want help with %q", g, out, "Available Commands")
+			}
+		})
+	}
+}
+
+// TestErrorHintSuggestsLoginOn401 verifies a 401 from any command that reaches
+// the API gets the sign-in hint. This is the case from issue #21: `agents list`
+// printed only the raw 401 with no indication that logging in would fix it.
+func TestErrorHintSuggestsLoginOn401(t *testing.T) {
+	err := &apiclient.StatusError{
+		Endpoint:   "http://rossoctl-ui.localtest.me:8080/api/v1/agents?namespace=team1",
+		StatusCode: http.StatusUnauthorized,
+		Body:       `{"detail":"Token signing key not found"}`,
+	}
+
+	hint := errorHint(err)
+	if hint == "" {
+		t.Fatal("a 401 should produce a hint")
+	}
+	if !strings.Contains(hint, "rossoctl login") {
+		t.Errorf("hint %q should name `rossoctl login`", hint)
+	}
+}
+
+// TestErrorHintFindsWrappedStatusError verifies the hint survives wrapping, since
+// commands add context to client errors on the way up.
+func TestErrorHintFindsWrappedStatusError(t *testing.T) {
+	inner := &apiclient.StatusError{Endpoint: "http://x/api/v1/tools", StatusCode: http.StatusUnauthorized, Body: "nope"}
+	wrapped := fmt.Errorf("listing tools in namespace %q: %w", "team1", inner)
+
+	if hint := errorHint(wrapped); hint == "" {
+		t.Error("a wrapped 401 should still produce a hint")
+	}
+}
+
+// TestErrorHintQuietForOtherErrors verifies the hint is offered only where it is
+// the actual remedy. A 403 is the notable exclusion: that is an authenticated
+// identity without permission, so signing in again changes nothing.
+func TestErrorHintQuietForOtherErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"403 is permission, not credentials", &apiclient.StatusError{StatusCode: http.StatusForbidden, Body: "forbidden"}},
+		{"404", &apiclient.StatusError{StatusCode: http.StatusNotFound, Body: "no such agent"}},
+		{"500", &apiclient.StatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}},
+		{"not an HTTP error at all", errors.New("connection refused")},
+		{"nil", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if hint := errorHint(tc.err); hint != "" {
+				t.Errorf("errorHint = %q, want no hint", hint)
 			}
 		})
 	}

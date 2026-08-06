@@ -43,6 +43,30 @@ func (c *Client) logf(format string, args ...any) {
 	}
 }
 
+// StatusError is returned for any response outside 2xx. It carries the status
+// code so callers can react to a particular one — the command layer suggests
+// signing in on a 401 — rather than matching on the message text.
+//
+// The Error string is unchanged from the plain fmt.Errorf this replaced, so
+// existing output and any test asserting on it still hold. No advice is added
+// here: this package is free of Cobra and does not know the binary's name or
+// which of its commands to recommend.
+type StatusError struct {
+	// Endpoint is the full URL that was requested.
+	Endpoint string
+
+	// StatusCode is the HTTP status returned.
+	StatusCode int
+
+	// Body is the response body, trimmed and truncated, or the status line
+	// when the body was empty.
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s returned %d: %s", e.Endpoint, e.StatusCode, e.Body)
+}
+
 // AuthConfig mirrors the backend's AuthConfigResponse (GET /auth/config).
 // Pointer fields are used for the optional values so that "absent" (null)
 // is distinguishable from "empty string" when rendering.
@@ -151,7 +175,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body, out
 		if msg == "" {
 			msg = resp.Status
 		}
-		return fmt.Errorf("%s returned %d: %s", endpoint, resp.StatusCode, msg)
+		return &StatusError{Endpoint: endpoint, StatusCode: resp.StatusCode, Body: msg}
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

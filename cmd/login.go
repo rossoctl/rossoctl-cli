@@ -121,7 +121,11 @@ func deviceLogin(cmd *cobra.Command) (string, error) {
 	}
 	authCfg, err := client.GetAuthConfig(cmd.Context())
 	if err != nil {
-		return "", err
+		// Reported as its own failure rather than passed through, so the 401
+		// hint does not fire here: this *is* login, and telling the user to run
+		// it would send them in a circle. /auth/config is unauthenticated, so a
+		// 401 from it is a server or proxy problem, not a missing credential.
+		return "", fmt.Errorf("reading auth config from the server, needed to start the login flow: %v", err)
 	}
 	if !authCfg.Enabled {
 		return "", fmt.Errorf("authentication is not enabled on the server; use --token instead")
