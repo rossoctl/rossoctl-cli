@@ -222,3 +222,79 @@ func TestAgentsImportFromSourceGitBranchDefault(t *testing.T) {
 		t.Errorf("--gitBranch default = %q, want %q", f.DefValue, "main")
 	}
 }
+
+// TestAgentsImportCreateHTTPRouteDefault verifies the flag defaults to false and
+// that false is sent explicitly rather than omitted.
+//
+// The presence assertion is the point: the field has no omitempty, so a false
+// value must still appear on the wire. Were it dropped, the server would apply
+// its own default instead of the value the caller asked for.
+func TestAgentsImportCreateHTTPRouteDefault(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	got, ok := body["createHttpRoute"]
+	if !ok {
+		t.Fatalf("createHttpRoute missing from the request body: %+v", body)
+	}
+	if got != false {
+		t.Errorf("createHttpRoute = %v, want false (default)", got)
+	}
+}
+
+// TestAgentsImportCreateHTTPRoute verifies the flag reaches the request body.
+func TestAgentsImportCreateHTTPRoute(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "--createHttpRoute", "from-image",
+		"--name", "orders", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if body["createHttpRoute"] != true {
+		t.Errorf("createHttpRoute = %v, want true", body["createHttpRoute"])
+	}
+}
+
+// TestAgentsImportCreateHTTPRouteExplicitFalse verifies an explicit =false is
+// sent as false, which is the case omitempty would have silently dropped.
+func TestAgentsImportCreateHTTPRouteExplicitFalse(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "--createHttpRoute=false", "from-image",
+		"--name", "orders", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	got, ok := body["createHttpRoute"]
+	if !ok {
+		t.Fatalf("createHttpRoute missing from the request body: %+v", body)
+	}
+	if got != false {
+		t.Errorf("createHttpRoute = %v, want false", got)
+	}
+}
+
+// TestAgentsImportCreateHTTPRouteIsPersistent verifies the flag is accepted on
+// the group and by both subcommands, like --deployment-type.
+func TestAgentsImportCreateHTTPRouteIsPersistent(t *testing.T) {
+	isolateHome(t)
+	for _, sub := range []string{"from-image", "from-source"} {
+		if out, err := execute(t, "agents", "import", sub, "--help"); err != nil {
+			t.Errorf("%s --help: %v", sub, err)
+		} else if !strings.Contains(out, "--createHttpRoute") {
+			t.Errorf("%s --help does not document --createHttpRoute:\n%s", sub, out)
+		}
+	}
+}

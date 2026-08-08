@@ -13,6 +13,16 @@ import (
 // backend's workloadType.
 var importDeploymentType string
 
+// importCreateHTTPRoute backs the persistent --createHttpRoute flag on the
+// import group, inherited by from-image and from-source. It maps to the
+// backend's createHttpRoute.
+//
+// Persistent, like --deployment-type, rather than declared on from-image alone:
+// exposing the agent is not specific to how it was built, so a flag that worked
+// on one subcommand and was rejected by the other would be a difference with no
+// reason behind it.
+var importCreateHTTPRoute bool
+
 // newAgentsImportCmd builds the `agents import` command and its two
 // subcommands, `from-image` and `from-source`.
 //
@@ -21,9 +31,11 @@ var importDeploymentType string
 func newAgentsImportCmd() *cobra.Command {
 	importCmd := newGroup("import", "Import an agent from an image or from source")
 
-	// Persistent so both subcommands inherit it.
+	// Persistent so both subcommands inherit them.
 	importCmd.PersistentFlags().StringVar(&importDeploymentType, "deployment-type", "deployment",
 		"workload type for the agent: deployment|statefulset|job|sandbox")
+	importCmd.PersistentFlags().BoolVar(&importCreateHTTPRoute, "createHttpRoute", false,
+		"create an HTTPRoute exposing the agent")
 
 	importCmd.AddCommand(
 		newAgentsImportFromImageCmd(),
@@ -79,6 +91,7 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 				ContainerImage:   containerImage,
 				ImagePullSecret:  imagePullSecret,
 				EnvVars:          envVars,
+				CreateHTTPRoute:  importCreateHTTPRoute,
 			})
 			if err != nil {
 				return err

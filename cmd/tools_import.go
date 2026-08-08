@@ -15,6 +15,16 @@ import (
 // backend's workloadType.
 var toolsImportDeploymentType string
 
+// toolsImportCreateHTTPRoute backs the persistent --createHttpRoute flag on the
+// tools import group, inherited by from-image and from-source. It maps to the
+// backend's createHttpRoute.
+//
+// Persistent, like --deployment-type, rather than declared on from-image alone:
+// exposing the tool is not specific to how it was built, so a flag that worked
+// on one subcommand and was rejected by the other would be a difference with no
+// reason behind it.
+var toolsImportCreateHTTPRoute bool
+
 // newToolsImportCmd builds the `tools import` command and its two subcommands,
 // `from-image` and `from-source`, mirroring `agents import`.
 //
@@ -23,10 +33,12 @@ var toolsImportDeploymentType string
 func newToolsImportCmd() *cobra.Command {
 	importCmd := newGroup("import", "Import a tool from an image or from source")
 
-	// Persistent so both subcommands inherit it. Tools support deployment and
+	// Persistent so both subcommands inherit them. Tools support deployment and
 	// statefulset workload types.
 	importCmd.PersistentFlags().StringVar(&toolsImportDeploymentType, "deployment-type", "deployment",
 		"workload type for the tool: deployment|statefulset")
+	importCmd.PersistentFlags().BoolVar(&toolsImportCreateHTTPRoute, "createHttpRoute", false,
+		"create an HTTPRoute exposing the tool")
 
 	importCmd.AddCommand(
 		newToolsImportFromImageCmd(),
@@ -92,6 +104,7 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 				ImagePullSecret:  imagePullSecret,
 				EnvVars:          envVars,
 				ServicePorts:     servicePorts,
+				CreateHTTPRoute:  toolsImportCreateHTTPRoute,
 			})
 			if err != nil {
 				return err

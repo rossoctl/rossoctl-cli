@@ -260,3 +260,79 @@ func TestToolsImportFromSourceGitBranchDefault(t *testing.T) {
 		t.Errorf("--gitBranch default = %q, want %q", f.DefValue, "main")
 	}
 }
+
+// TestToolsImportCreateHTTPRouteDefault verifies the flag defaults to false and
+// that false is sent explicitly rather than omitted.
+//
+// The presence assertion is the point: the field has no omitempty, so a false
+// value must still appear on the wire. Were it dropped, the server would apply
+// its own default instead of the value the caller asked for.
+func TestToolsImportCreateHTTPRouteDefault(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "tools", "import", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	got, ok := body["createHttpRoute"]
+	if !ok {
+		t.Fatalf("createHttpRoute missing from the request body: %+v", body)
+	}
+	if got != false {
+		t.Errorf("createHttpRoute = %v, want false (default)", got)
+	}
+}
+
+// TestToolsImportCreateHTTPRoute verifies the flag reaches the request body.
+func TestToolsImportCreateHTTPRoute(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "tools", "import", "--createHttpRoute", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if body["createHttpRoute"] != true {
+		t.Errorf("createHttpRoute = %v, want true", body["createHttpRoute"])
+	}
+}
+
+// TestToolsImportCreateHTTPRouteExplicitFalse verifies an explicit =false is
+// sent as false, which is the case omitempty would have silently dropped.
+func TestToolsImportCreateHTTPRouteExplicitFalse(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "tools", "import", "--createHttpRoute=false", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	got, ok := body["createHttpRoute"]
+	if !ok {
+		t.Fatalf("createHttpRoute missing from the request body: %+v", body)
+	}
+	if got != false {
+		t.Errorf("createHttpRoute = %v, want false", got)
+	}
+}
+
+// TestToolsImportCreateHTTPRouteIsPersistent verifies the flag is accepted on
+// the group and by both subcommands, like --deployment-type.
+func TestToolsImportCreateHTTPRouteIsPersistent(t *testing.T) {
+	isolateHome(t)
+	for _, sub := range []string{"from-image", "from-source"} {
+		if out, err := execute(t, "tools", "import", sub, "--help"); err != nil {
+			t.Errorf("%s --help: %v", sub, err)
+		} else if !strings.Contains(out, "--createHttpRoute") {
+			t.Errorf("%s --help does not document --createHttpRoute:\n%s", sub, out)
+		}
+	}
+}

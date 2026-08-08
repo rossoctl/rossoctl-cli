@@ -395,6 +395,16 @@ type CreateAgentRequest struct {
 	GitURL    string `json:"gitUrl,omitempty"`
 	GitPath   string `json:"gitPath,omitempty"`
 	GitBranch string `json:"gitBranch,omitempty"`
+
+	// CreateHTTPRoute asks the server to create an HTTPRoute exposing the
+	// agent. The server's own default is false, matching this zero value.
+	//
+	// Deliberately without omitempty, unlike the fields above: a false bool is
+	// indistinguishable from an absent one, so omitempty would drop an explicit
+	// --createHttpRoute=false and leave the server to apply its default. That
+	// default agrees today, but sending what the caller asked for should not
+	// depend on the two staying in agreement.
+	CreateHTTPRoute bool `json:"createHttpRoute"`
 }
 
 // CreateAgentResponse mirrors the backend's CreateAgentResponse model.
@@ -505,6 +515,14 @@ type CreateToolRequest struct {
 	GitURL    string `json:"gitUrl,omitempty"`
 	GitPath   string `json:"gitPath,omitempty"`
 	GitBranch string `json:"gitBranch,omitempty"`
+
+	// CreateHTTPRoute asks the server to create an HTTPRoute exposing the tool.
+	// The server's own default is false, matching this zero value.
+	//
+	// Deliberately without omitempty, for the same reason as the identically
+	// named field on CreateAgentRequest: a false bool is indistinguishable from
+	// an absent one, so omitempty would drop an explicit --createHttpRoute=false.
+	CreateHTTPRoute bool `json:"createHttpRoute"`
 }
 
 // CreateToolResponse mirrors the backend's CreateToolResponse model.
