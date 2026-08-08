@@ -396,31 +396,30 @@ func TestAuthbridgeSessionServerDefault(t *testing.T) {
 	}
 }
 
-// TestCortexGroupHidden verifies the cortex group is hidden from help listings
-// while still being invocable by name.
-func TestCortexGroupHidden(t *testing.T) {
+// TestCortexGroupVisible verifies the cortex group is part of the advertised CLI
+// surface: it is not hidden, and it appears in the root help listing alongside
+// the other groups.
+func TestCortexGroupVisible(t *testing.T) {
 	c, _, err := rootCmd.Find([]string{"cortex"})
 	if err != nil {
 		t.Fatalf("cortex not found: %v", err)
 	}
-	if !c.Hidden {
-		t.Error("the cortex group should be hidden")
+	if c.Hidden {
+		t.Error("the cortex group should not be hidden")
 	}
 
-	// Hidden must not mean removed: a subcommand still runs when named.
-	if _, err := execute(t, "cortex", "status"); err != nil {
-		t.Errorf("hidden cortex status should still run: %v", err)
-	}
-
-	// ...and it must not appear in the root help listing.
 	out, err := execute(t, "--help")
 	if err != nil {
 		t.Fatalf("--help: %v", err)
 	}
+	var listed bool
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "cortex ") {
-			t.Errorf("cortex should not be listed in root help: %q", line)
+			listed = true
 		}
+	}
+	if !listed {
+		t.Errorf("cortex should be listed in root help:\n%s", out)
 	}
 	if !strings.Contains(out, "authbridge") {
 		t.Errorf("authbridge should be listed in root help:\n%s", out)

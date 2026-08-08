@@ -17,7 +17,6 @@ import (
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
-	"github.com/rossoctl/rossoctl-cli/internal/cortexclient"
 	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
 )
 
@@ -132,7 +131,7 @@ func currentNamespace() (string, error) {
 }
 
 // newClient builds a Rossoctl backend for the effective context, delegating
-// construction (and the api-vs-cortex dispatch) to rossoctlclient.NewClient.
+// construction to rossoctlclient.NewClient.
 //
 // An explicit --server overrides any context and always targets the HTTP API,
 // so it is modeled as a transient api context with that server and no token.
@@ -159,21 +158,23 @@ func newClient(cmd *cobra.Command) (rossoctlclient.Rossoctl, error) {
 }
 
 // attachVerboseLogger wires a stderr logger onto client when --verbose is set.
-// It handles both backends: the HTTP apiclient.Client and the file-backed
-// cortexclient.FileClient each expose a Logf hook.
+//
+// The hook lives on the concrete client rather than on the Rossoctl interface,
+// so this asserts for the one implementation that has it. A client without the
+// hook is left alone rather than reported: --verbose asks for extra output, and
+// failing a command because a backend cannot provide it would be worse than
+// staying quiet.
 func attachVerboseLogger(cmd *cobra.Command, client rossoctlclient.Rossoctl) {
 	if !verbose {
 		return
 	}
-	errOut := cmd.ErrOrStderr()
-	logf := func(format string, args ...any) {
-		fmt.Fprintf(errOut, format+"\n", args...)
+	c, ok := client.(*apiclient.Client)
+	if !ok {
+		return
 	}
-	switch c := client.(type) {
-	case *apiclient.Client:
-		c.Logf = logf
-	case *cortexclient.FileClient:
-		c.Logf = logf
+	errOut := cmd.ErrOrStderr()
+	c.Logf = func(format string, args ...any) {
+		fmt.Fprintf(errOut, format+"\n", args...)
 	}
 }
 

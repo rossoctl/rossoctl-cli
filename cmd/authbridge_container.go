@@ -149,6 +149,11 @@ type proxyContainer struct {
 	// id identifies the container to the runtime.
 	id string
 
+	// name is the name the container was started under. Unlike id it is chosen
+	// by rossoctl rather than assigned by the runtime, which is what lets an
+	// instance record name a container an operator can then find in `docker ps`.
+	name string
+
 	// caDir is the host directory bind-mounted at the config's tls_bridge.ca_dir
 	// for the container to write its CA into, or "" when no CA was expected.
 	// It is a temp directory owned by this struct and removed by cleanup.
@@ -170,7 +175,14 @@ type proxyContainer struct {
 // cfgPath is the realized config file on this host (see materializeConfig); it
 // is mounted read-only at containerConfigPath. cfg is the parsed form of that
 // same file, read here only to decide whether a CA directory is needed.
-func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, image string) (*authbridgeHost, error) {
+//
+// name is what to call the container. It is supplied rather than left to the
+// runtime so the instance record can name a container an operator can find.
+func startAuthbridgeContainer(
+	cmd *cobra.Command,
+	cfg *config.Config,
+	cfgPath, image, name string,
+) (*authbridgeHost, error) {
 	errOut := cmd.ErrOrStderr()
 
 	engine, bin, err := containers.Detect()
@@ -194,7 +206,7 @@ func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, i
 		return nil, err
 	}
 
-	pc, err := runProxyContainer(cmd, engine, cfg, cfgPath, image, ports)
+	pc, err := runProxyContainer(cmd, engine, cfg, cfgPath, image, name, ports)
 	if err != nil {
 		return nil, err
 	}
@@ -224,11 +236,32 @@ func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, i
 	if verbose {
 		reportContainerPorts(errOut, bound, ports)
 	}
+	// The addresses to record for this instance, as reached from this host: the
+	// published side of each mapping, not the port bound inside the container.
+	// A port the config did not ask for, or that the image did not publish, is
+	// left empty — the record distinguishes "no such listener" from an address.
+	addrs := hostAddrs{containerName: pc.name}
+	for _, m := range []struct {
+		port int
+		out  *string
+	}{
+		{ports.reverse, &addrs.inbound},
+		{ports.sessionAPI, &addrs.session},
+		{ports.admin, &addrs.admin},
+	} {
+		if m.port == 0 {
+			continue
+		}
+		if host, ok := containers.HostPort(bound, m.port); ok {
+			*m.out = fmt.Sprintf("127.0.0.1:%d", host)
+		}
+	}
+
 	// Printed unconditionally, like the in-process session API address: the
 	// operator needs the session API port to use the endpoint, and it is
 	// different on every run.
-	if p, ok := containers.HostPort(bound, ports.sessionAPI); ok {
-		fmt.Fprintf(errOut, "session API listening on 127.0.0.1:%d (in container %s)\n", p, shortID(pc.id))
+	if addrs.session != "" {
+		fmt.Fprintf(errOut, "session API listening on %s (in container %s)\n", addrs.session, pc.name)
 	}
 
 	// The child must trust the bridge's CA before it can talk HTTPS through it,
@@ -253,6 +286,7 @@ func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, i
 		env:      childEnv(proxyAddr, caCertPath, errOut),
 		serveErr: serveErr,
 		stop:     func() { stopAuthbridgeContainer(cmd, pc) },
+		addrs:    addrs,
 	}, nil
 }
 
@@ -262,14 +296,15 @@ func startAuthbridgeContainer(cmd *cobra.Command, cfg *config.Config, cfgPath, i
 // behind.
 //
 // ports says which container ports to publish; see containerPortsFromConfig.
+// name is what to call the container.
 func runProxyContainer(
 	cmd *cobra.Command,
 	engine containers.Engine,
 	cfg *config.Config,
-	cfgPath, image string,
+	cfgPath, image, name string,
 	ports containerPorts,
 ) (*proxyContainer, error) {
-	pc := &proxyContainer{engine: engine, cleanup: func() {}}
+	pc := &proxyContainer{engine: engine, name: name, cleanup: func() {}}
 
 	// The config is mounted read-only: the container reads it at startup and has
 	// no reason to write back to this host's file, which may be the operator's
@@ -318,6 +353,7 @@ func runProxyContainer(
 
 	id, err := engine.Start(cmd.Context(), containers.RunSpec{
 		Image:        image,
+		Name:         name,
 		PublishPorts: ports.publishList(),
 		Mounts:       mounts,
 		HostEntries:  hostEntries,
@@ -330,7 +366,8 @@ func runProxyContainer(
 	pc.id = id
 
 	if verbose {
-		fmt.Fprintf(cmd.ErrOrStderr(), "started proxy container %s from %s\n", shortID(id), image)
+		fmt.Fprintf(cmd.ErrOrStderr(), "started proxy container %s (%s) from %s\n",
+			name, shortID(id), image)
 	}
 	return pc, nil
 }

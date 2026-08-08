@@ -31,6 +31,8 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
 	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
+
+	"github.com/rossoctl/rossoctl-cli/internal/instances"
 )
 
 // execArgs holds the `authbridge exec` flags.
@@ -39,6 +41,9 @@ var execArgs struct {
 	logfile             string
 	sessionServer       string
 	proxyContainerImage string
+	instanceName        string
+	namespace           string
+	inboundProtocol     string
 }
 
 // defaultSessionServer is where the session API listens when --sessionServer is
@@ -172,6 +177,26 @@ to 30s for ca.crt to appear there, and the CA trust variables point at it. The
 container is stopped and the temporary directory removed when the command exits.
 This needs docker or podman on PATH ($ROSSOCORTEX_RUNTIME overrides which).
 
+While the command runs, exec records the instance as a <name>.json file in
+~/.config/rossocortex/namespaces/<namespace>, and removes it when the command
+exits. The file names the instance, its namespace, the proxy container (with
+--proxyContainerImage), the inbound, session, and admin addresses as reached from
+this host, the inbound protocol, and the command line — so another tool can find
+a running instance and where to reach it.
+
+--instanceName sets the recorded name instead of generating one. Since the name
+is the file name, it must be unique within the namespace: a name already in use
+is refused rather than overwriting the running instance that holds it.
+--namespace chooses the namespace, defaulting to the current context's and
+falling back to "team1" when the context has none. Both must be usable as a
+single path component — letters, digits, '-', '_' and '.'. --inboundProtocol
+records whether the inbound listener fronts a2a (the default) or mcp.
+
+The record is advisory: a process killed with SIGKILL cannot remove its file, so
+a reader should treat one as a claim to verify rather than proof. A stale file
+also keeps its name claimed, so restarting with the same --instanceName after a
+SIGKILL means deleting the leftover record first.
+
 Authbridge's own log output goes to --logfile (default /tmp/authbridge.log), not
 to stderr, so it does not interleave with the command's output. The path is
 printed at startup. Pass --logfile "" to log to stderr instead.
@@ -245,8 +270,8 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 }
 
 // authbridgeHost is what a proxy implementation hands back to execWithPipeline:
-// the environment the child needs to reach it, and the channel an async listener
-// failure arrives on.
+// the environment the child needs to reach it, the channel an async listener
+// failure arrives on, and where its listeners ended up.
 //
 // stop tears the host down. It is the counterpart of the constructor's stepwise
 // setup, so it must be called on every exit path — including a setup failure
@@ -262,6 +287,37 @@ type authbridgeHost struct {
 
 	// stop shuts the host down in reverse construction order. Never nil.
 	stop func()
+
+	// addrs is where this host's listeners can be reached from this machine, for
+	// the instance record. It is reported by the constructor rather than derived
+	// from the config by the caller, because the two paths arrive at these
+	// addresses differently: the in-process path knows the addresses it bound,
+	// while the container path has to ask the runtime which host ports it
+	// published.
+	addrs hostAddrs
+}
+
+// hostAddrs are an authbridgeHost's listener addresses as reached from this
+// machine, each empty when there is no such listener.
+//
+// "As reached from this machine" is the point: for a container these are the
+// published host ports, not the ports bound inside it. Recording the inside
+// address would name something unreachable.
+type hostAddrs struct {
+	// containerName is the proxy container's name, empty when the pipeline runs
+	// in this process.
+	containerName string
+
+	// inbound is the reverse proxy — where callers reach the hosted service.
+	inbound string
+
+	// session is the session events endpoint (the 9094 listener).
+	session string
+
+	// admin is the stats/config endpoint (the 9093 listener). The in-process
+	// path leaves this empty: it starts no admin server, so there is no address
+	// to report. Only the container path has one, because the image serves it.
+	admin string
 }
 
 // execWithPipeline loads the config, brings the host up around the child
@@ -285,16 +341,195 @@ func execWithPipeline(cmd *cobra.Command, argv []string) error {
 		return fmt.Errorf("loading config %s: %w", execArgs.config, err)
 	}
 
+	// All three are resolved before anything starts, so a bad --inboundProtocol,
+	// an unusable --namespace, or an --instanceName already in use is reported
+	// without having brought a pipeline up and torn it down again.
+	//
+	// The name in particular has to be known this early: the container is named
+	// after the instance, so the name cannot be left for instances.Create to
+	// generate after the fact. The namespace has to precede the name because the
+	// name's uniqueness check is scoped to it.
+	proto, err := instances.ParseProtocol(execArgs.inboundProtocol)
+	if err != nil {
+		return err
+	}
+	namespace, err := execNamespace()
+	if err != nil {
+		return err
+	}
+	name, err := instanceName(namespace)
+	if err != nil {
+		return err
+	}
+
 	// --proxyContainerImage hosts the pipeline in a container instead of in this
 	// process. The two paths produce the same *authbridgeHost, so everything from
 	// here down — the child command, its environment, the teardown — is common.
-	host, err := startHost(cmd, cfg, path)
+	host, err := startHost(cmd, cfg, path, name)
 	if err != nil {
 		return err
 	}
 	defer host.stop()
 
+	// Record the instance for as long as the child runs. This is deliberately
+	// after startHost: the record names the addresses the listeners actually
+	// bound, which are not known until they are up.
+	//
+	// Registered *before* runPassthrough and removed after, so the file exists
+	// exactly while the command is being hosted. The removal is deferred rather
+	// than done at the end of the function body, so a signal-driven return path
+	// cleans up the same as a normal exit.
+	rec, err := registerInstance(cmd, argv, name, namespace, proto, host.addrs)
+	if err != nil {
+		return err
+	}
+	defer unregisterInstance(cmd, rec)
+
 	return runPassthrough(cmd, argv, host.env, host.serveErr)
+}
+
+// instanceName returns the name to record for this run: --instanceName when
+// given, and a generated one otherwise.
+//
+// A supplied name is checked for a clash here, before anything is started, so a
+// duplicate is reported without having brought a pipeline up and torn it down
+// again. The check is advisory — two exec invocations racing on the same name
+// could both pass it — and instances.Create makes the same check atomically when
+// it writes. This one exists to fail early and with a clearer message.
+//
+// A generated name is not checked: NewName's random suffix makes a clash
+// unlikely, and Create would report one anyway.
+func instanceName(namespace string) (string, error) {
+	if execArgs.instanceName == "" {
+		return instances.NewName()
+	}
+
+	name := execArgs.instanceName
+	if err := instances.ValidName(name); err != nil {
+		return "", fmt.Errorf("--instanceName %q is not usable as a file name: %w", name, err)
+	}
+	taken, err := instances.Exists(namespace, name)
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		return "", fmt.Errorf("an instance named %q already exists in namespace %q; "+
+			"pick another --instanceName or stop the instance using it", name, namespace)
+	}
+	return name, nil
+}
+
+// execNamespace returns the namespace to record this instance in: --namespace
+// when given, otherwise the current context's namespace, falling back to
+// instances.DefaultNamespace.
+//
+// The fallback is why this does not use currentNamespace: that reports an unset
+// namespace as an error, which is right for a command about to query a server but
+// wrong here. exec hosts a local process that has to be recorded somewhere, and
+// refusing to run because a context lacks a namespace would block a workflow that
+// never needed one.
+//
+// A context that cannot be read is likewise not fatal — exec is configured
+// entirely by --config and does not otherwise need a context, so a missing or
+// unreadable config file falls back rather than failing. An explicit --context
+// naming a nonexistent context is still rejected, but that check happens earlier
+// in RunE.
+//
+// The lookup is read-only, and deliberately not resolveContext: that seeds a
+// default context on first use, and exec must not create a config file as a side
+// effect of recording an instance.
+func execNamespace() (string, error) {
+	if ns := execArgs.namespace; ns != "" {
+		if err := instances.ValidName(ns); err != nil {
+			return "", fmt.Errorf("--namespace %q is not usable as a directory name: %w", ns, err)
+		}
+		return ns, nil
+	}
+
+	if ns := contextNamespaceOrEmpty(); ns != "" {
+		// A context namespace still has to be usable as a directory name; one
+		// that is not is reported rather than silently replaced, since the
+		// operator would otherwise not know where the record went.
+		if err := instances.ValidName(ns); err != nil {
+			return "", fmt.Errorf("the current context's namespace %q is not usable as a directory name: %w",
+				ns, err)
+		}
+		return ns, nil
+	}
+	return instances.DefaultNamespace, nil
+}
+
+// contextNamespaceOrEmpty returns the effective context's namespace without
+// creating a context, or "" when there is none to read.
+//
+// Every failure yields "" rather than an error: the only caller has a working
+// fallback, and exec does not otherwise depend on a context, so a missing config
+// file is an ordinary state here rather than something to report. Note that this
+// package's `config` identifier is authbridge's config package, which is why the
+// namespace is returned as a string rather than a *config.Context.
+func contextNamespaceOrEmpty() string {
+	cfg, err := loadConfigReadOnly()
+	if err != nil {
+		return ""
+	}
+	if contextOverride != "" {
+		// RunE already rejected an unknown --context; treat it as absent.
+		if ctx, ok := cfg.Get(contextOverride); ok {
+			return ctx.Namespace
+		}
+		return ""
+	}
+	if ctx, ok := cfg.Current(); ok {
+		return ctx.Namespace
+	}
+	return ""
+}
+
+// registerInstance writes the instance file describing this run.
+func registerInstance(
+	cmd *cobra.Command,
+	argv []string,
+	name, namespace string,
+	proto instances.Protocol,
+	addrs hostAddrs,
+) (*instances.Handle, error) {
+	rec, err := instances.Create(instances.Instance{
+		Name:            name,
+		Namespace:       namespace,
+		ContainerName:   addrs.containerName,
+		InboundAddr:     addrs.inbound,
+		InboundProtocol: proto,
+		SessionAddr:     addrs.session,
+		AdminAddr:       addrs.admin,
+		CommandLine:     argv,
+	})
+	if err != nil {
+		// Fatal rather than a warning: the file is what makes a running instance
+		// discoverable, and silently starting an instance nothing can find would
+		// be worse than not starting it. A failure here means either the config
+		// directory is unwritable or the name was claimed since it was checked —
+		// both things the operator should see rather than have papered over.
+		return nil, err
+	}
+
+	if verbose {
+		fmt.Fprintf(cmd.ErrOrStderr(), "registered instance %s in namespace %s at %s\n",
+			rec.Instance.Name, rec.Instance.Namespace, rec.Path)
+	}
+	return rec, nil
+}
+
+// unregisterInstance removes the instance file, reporting a failure without
+// changing the command's exit status.
+//
+// A removal failure is only a warning: by the time it runs the child has already
+// exited, and its status is what the operator asked about. A stale file is a
+// nuisance for whoever reads the directory next, not a reason to report this run
+// as failed — which is also why the record is documented as advisory.
+func unregisterInstance(cmd *cobra.Command, rec *instances.Handle) {
+	if err := rec.Remove(); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", err)
+	}
 }
 
 // startHost brings up the pipeline the child command runs behind, in a container
@@ -302,7 +537,10 @@ func execWithPipeline(cmd *cobra.Command, argv []string) error {
 //
 // cfgPath is the realized config file, which only the container path needs: it
 // mounts the file rather than reusing the already-parsed cfg.
-func startHost(cmd *cobra.Command, cfg *config.Config, cfgPath string) (*authbridgeHost, error) {
+//
+// instName is this run's instance name, likewise needed only by the container
+// path, which names the container after it.
+func startHost(cmd *cobra.Command, cfg *config.Config, cfgPath, instName string) (*authbridgeHost, error) {
 	if execArgs.proxyContainerImage != "" {
 		// ApplyPreset and Validate would otherwise be skipped on this path: the
 		// container does its own loading, but the CA-directory decision below
@@ -312,7 +550,8 @@ func startHost(cmd *cobra.Command, cfg *config.Config, cfgPath string) (*authbri
 		if err := config.Validate(cfg); err != nil {
 			return nil, fmt.Errorf("invalid config: %w", err)
 		}
-		return startAuthbridgeContainer(cmd, cfg, cfgPath, execArgs.proxyContainerImage)
+		return startAuthbridgeContainer(cmd, cfg, cfgPath, execArgs.proxyContainerImage,
+			instances.NewContainerName(instName))
 	}
 	return startAuthbridgeHost(cmd, cfg)
 }
@@ -508,13 +747,13 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 	// The reverse proxy is registered after the forward one so it shuts down
 	// first: stop accepting new inbound work before tearing down the egress path
 	// that work depends on.
-	reverseSrv, err := startReverseProxy(cfg, inboundH, sessions, sharedStore, errOut)
+	reverseSrv, inboundAddr, err := startReverseProxy(cfg, inboundH, sessions, sharedStore, errOut)
 	if err != nil {
 		return fail(err)
 	}
 	stops = append(stops, func() { shutdownHTTP(reverseSrv, "reverse proxy", errOut) })
 
-	apiSrv, err := startSessionAPI(cfg.Listener.SessionAPIAddr, inboundH, outboundH, sessions, serveErr, errOut)
+	apiSrv, sessionAddr, err := startSessionAPI(cfg.Listener.SessionAPIAddr, inboundH, outboundH, sessions, serveErr, errOut)
 	if err != nil {
 		return fail(err)
 	}
@@ -543,6 +782,11 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 		env:      childEnv(proxyAddr, caCertPath, errOut),
 		serveErr: serveErr,
 		stop:     stop,
+		// containerName and admin are left empty: this path runs the pipeline in
+		// this process, so there is no container, and it starts no admin server
+		// (stats.address is read only by the container path, which publishes the
+		// port the image serves it on).
+		addrs: hostAddrs{inbound: inboundAddr, session: sessionAddr},
 	}, nil
 }
 
@@ -728,12 +972,13 @@ func startForwardProxy(
 }
 
 // startReverseProxy starts the inbound (reverse) proxy when the reverse role is
-// active, returning the server for shutdown. It is nil when the reverse role is
-// inactive or the address was explicitly blanked.
+// active, returning the server for shutdown and its bound address. Both are
+// zero when the reverse role is inactive or the address was explicitly blanked.
 //
-// No address is returned, unlike startForwardProxy: the reverse proxy is where
-// *callers* reach the hosted service, not where the hosted command sends its
-// egress, so nothing in the child's environment depends on it.
+// The address is returned for the instance record, not for the child: unlike
+// startForwardProxy's, it is where *callers* reach the hosted service rather
+// than where the hosted command sends its egress, so nothing in the child's
+// environment depends on it.
 //
 // The listener is bound here rather than through runtimeutil.StartReverseProxyServer,
 // which keeps it internal. Same reason as the forward proxy: we need the *bound*
@@ -747,9 +992,9 @@ func startReverseProxy(
 	sessions *session.Store,
 	sharedStore pipeline.SharedStore,
 	errOut io.Writer,
-) (*http.Server, error) {
+) (*http.Server, string, error) {
 	if !cfg.Listener.ActiveRoles()[config.RoleReverse] {
-		return nil, nil
+		return nil, "", nil
 	}
 	// ApplyPreset fills in a per-mode default (":8080" for proxy-sidecar), so an
 	// empty address here means the operator explicitly blanked it — treat that as
@@ -757,12 +1002,12 @@ func startReverseProxy(
 	addr := cfg.Listener.ReverseProxyAddr
 	if addr == "" {
 		fmt.Fprintln(errOut, "listener.reverse_proxy_addr is empty; no reverse proxy started")
-		return nil, nil
+		return nil, "", nil
 	}
 
 	backend := cfg.Listener.ReverseProxyBackend
 	if err := validateBackendURL(backend); err != nil {
-		return nil, fmt.Errorf("listener.reverse_proxy_backend: %w", err)
+		return nil, "", fmt.Errorf("listener.reverse_proxy_backend: %w", err)
 	}
 
 	// mTLS is deliberately off: reverseproxy.MTLSOptions needs an X509Source from
@@ -771,13 +1016,13 @@ func startReverseProxy(
 	// startAuthbridgeHost, so reaching here means plaintext is acceptable.
 	srv, err := reverseproxy.NewServer(inboundH, sessions, backend, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating reverse proxy: %w", err)
+		return nil, "", fmt.Errorf("creating reverse proxy: %w", err)
 	}
 	srv.Shared = sharedStore
 
 	ln, err := srv.Listen(addr)
 	if err != nil {
-		return nil, fmt.Errorf("reverse-proxy listen on %s: %w", addr, err)
+		return nil, "", fmt.Errorf("reverse-proxy listen on %s: %w", addr, err)
 	}
 	bound := ln.Addr().String()
 
@@ -802,7 +1047,7 @@ func startReverseProxy(
 	// callers from elsewhere, so binding every interface is its job rather than a
 	// mistake.
 	fmt.Fprintf(errOut, "reverse proxy listening on %s -> %s\n", bound, backend)
-	return httpSrv, nil
+	return httpSrv, bound, nil
 }
 
 // validateBackendURL rejects a reverse_proxy_backend that parses but cannot be
@@ -837,24 +1082,26 @@ func validateBackendURL(raw string) error {
 }
 
 // startSessionAPI starts the session API on addr when addr is set and session
-// tracking is on. Serving happens in a goroutine so the caller can carry on to
-// the command; a serve failure arrives on serveErr rather than killing the
-// process.
+// tracking is on, returning the server and its bound address. Both are zero when
+// the endpoint is disabled. Serving happens in a goroutine so the caller can
+// carry on to the command; a serve failure arrives on serveErr rather than
+// killing the process.
 //
 // The listener is bound here rather than through sessionapi's own
 // ListenAndServe so the *bound* address is known: with port 0 the kernel picks
-// the port, and the configured ":0" is not something an operator can curl. A
-// bind failure is returned synchronously, since it means the endpoint never came
-// up at all.
+// the port, and the configured ":0" is not something an operator can curl. That
+// bound address is both printed and returned, the latter for the instance
+// record. A bind failure is returned synchronously, since it means the endpoint
+// never came up at all.
 func startSessionAPI(
 	addr string,
 	inboundH, outboundH *pipeline.Holder,
 	sessions *session.Store,
 	serveErr chan<- error,
 	errOut io.Writer,
-) (*sessionapi.Server, error) {
+) (*sessionapi.Server, string, error) {
 	if addr == "" || sessions == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	// Both holders are passed so /v1/pipeline reports what was actually
@@ -868,7 +1115,7 @@ func startSessionAPI(
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("session API listen on %s: %w", addr, err)
+		return nil, "", fmt.Errorf("session API listen on %s: %w", addr, err)
 	}
 	bound := ln.Addr().String()
 
@@ -891,7 +1138,7 @@ func startSessionAPI(
 	// the endpoint. It deliberately does not go through slog, which --logfile
 	// redirects to a file the operator would have to go looking for.
 	fmt.Fprintf(errOut, "session API listening on %s\n", bound)
-	return srv, nil
+	return srv, bound, nil
 }
 
 // isWildcardHost reports whether addr binds every interface rather than a
@@ -1286,6 +1533,12 @@ func init() {
 		`address for the session API; overrides listener.session_api_addr when set. "" disables session tracking`)
 	f.StringVar(&execArgs.proxyContainerImage, "proxyContainerImage", "",
 		"run the pipeline in a container from this image instead of in-process")
+	f.StringVar(&execArgs.instanceName, "instanceName", "",
+		"name to record for this instance; a name is generated when omitted. Fails if the name is already in use in the namespace")
+	f.StringVar(&execArgs.namespace, "namespace", "",
+		"namespace to record this instance in; defaults to the current context's namespace, or \""+instances.DefaultNamespace+"\"")
+	f.StringVar(&execArgs.inboundProtocol, "inboundProtocol", string(instances.DefaultProtocol),
+		`protocol the inbound listener fronts, recorded in the instance file: "a2a" or "mcp"`)
 
 	// The authbridge group deliberately has no --cortex flag. exec is configured
 	// entirely by --config and never resolves a context, so the flag it used to

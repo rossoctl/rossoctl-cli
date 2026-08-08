@@ -23,15 +23,20 @@ const (
 	filePerm os.FileMode = 0o600
 )
 
-// Type is the kind of backend a Context targets: a live Rossoctl API server
-// ("api") or a Cortex file-backed client ("cortex").
+// Type records what kind of server a Context targets: a hosted Rossoctl API
+// ("api") or a local Cortex ("cortex").
+//
+// Both are reached the same way, over HTTP at the context's server URI, so the
+// type does not select a client implementation — it is a label describing what
+// is at the other end.
 type Type string
 
 const (
 	// TypeAPI is a context served by the Rossoctl HTTP API (backed by a
 	// Kubernetes cluster).
 	TypeAPI Type = "api"
-	// TypeCortex is a context served by a local Cortex file client.
+	// TypeCortex is a context served by a local Cortex, as started by
+	// `rossoctl cortex serve`.
 	TypeCortex Type = "cortex"
 )
 

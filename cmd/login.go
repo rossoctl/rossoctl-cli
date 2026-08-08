@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
 	"github.com/rossoctl/rossoctl-cli/internal/deviceflow"
 	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
@@ -66,7 +67,22 @@ until you authorize.`,
 
 		token := loginToken
 		if token == "" {
-			token, err = deviceLogin(cmd)
+			// Authentication enablement is checked here, not in deviceLogin: the
+			// decision to run the device flow at all belongs to the caller, and
+			// only this path needs the server's auth config.
+			authCfg, err := fetchAuthConfigForLogin(cmd)
+			if err != nil {
+				return err
+			}
+
+			// Without auth there is no flow to run and no token to obtain, so
+			// proceeding would store an empty one and report success. Say so
+			// instead, and name the way to log in to such a server.
+			if !authCfg.Enabled {
+				return fmt.Errorf("authentication is not enabled on the server; use --token instead")
+			}
+
+			token, err = deviceLogin(cmd, authCfg)
 			if err != nil {
 				return err
 			}
@@ -111,13 +127,15 @@ func firstNamespace(cmd *cobra.Command, target *config.Context) string {
 	return resp.Namespaces[0]
 }
 
-// deviceLogin runs the OAuth device authorization flow against the server's
-// Keycloak and returns the resulting access token.
-func deviceLogin(cmd *cobra.Command) (string, error) {
-	// Read Keycloak details from the resolved server's auth config.
+// fetchAuthConfigForLogin reads the resolved server's auth config, which the
+// device flow needs for its Keycloak details.
+//
+// It is separate from the flow itself so the caller can decide, from
+// authCfg.Enabled, whether to start the flow at all.
+func fetchAuthConfigForLogin(cmd *cobra.Command) (*apiclient.AuthConfig, error) {
 	client, err := newClient(cmd)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	authCfg, err := client.GetAuthConfig(cmd.Context())
 	if err != nil {
@@ -125,11 +143,18 @@ func deviceLogin(cmd *cobra.Command) (string, error) {
 		// hint does not fire here: this *is* login, and telling the user to run
 		// it would send them in a circle. /auth/config is unauthenticated, so a
 		// 401 from it is a server or proxy problem, not a missing credential.
-		return "", fmt.Errorf("reading auth config from the server, needed to start the login flow: %v", err)
+		return nil, fmt.Errorf("reading auth config from the server, needed to start the login flow: %v", err)
 	}
-	if !authCfg.Enabled {
-		return "", fmt.Errorf("authentication is not enabled on the server; use --token instead")
-	}
+	return authCfg, nil
+}
+
+// deviceLogin runs the OAuth device authorization flow against the Keycloak
+// named by authCfg and returns the resulting access token.
+//
+// The caller supplies authCfg and is responsible for having checked that
+// authentication is enabled; deviceLogin reads only the Keycloak details from
+// it and does not revisit that decision.
+func deviceLogin(cmd *cobra.Command, authCfg *apiclient.AuthConfig) (string, error) {
 	kcURL := deref(authCfg.KeycloakURL)
 	realm := deref(authCfg.Realm)
 	clientID := deref(authCfg.ClientID)

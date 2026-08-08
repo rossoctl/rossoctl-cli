@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
 )
 
@@ -145,6 +147,63 @@ func TestLoginDeviceFlowAuthDisabled(t *testing.T) {
 
 	if _, err := execute(t, "login"); err == nil {
 		t.Error("login should error when server auth is disabled and no --token given")
+	}
+}
+
+// TestDeviceLoginDoesNotCheckEnabled verifies the enablement check lives in the
+// caller rather than in deviceLogin: called directly with a disabled config,
+// deviceLogin proceeds to the Keycloak flow instead of refusing.
+//
+// It also pins that deviceLogin does not re-fetch /auth/config — the config it
+// is handed is the one it uses. The test server fails the test if /auth/config
+// is requested at all.
+func TestDeviceLoginDoesNotCheckEnabled(t *testing.T) {
+	isolateHome(t)
+
+	var authConfigCalls int
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/config":
+			authConfigCalls++
+			_, _ = w.Write([]byte(`{"enabled": false}`))
+		case strings.HasSuffix(r.URL.Path, "/protocol/openid-connect/auth/device"):
+			_, _ = w.Write([]byte(`{"device_code":"DEV","user_code":"CODE-1234",` +
+				`"verification_uri":"` + srv.URL + `/device","expires_in":600,"interval":1}`))
+		case strings.HasSuffix(r.URL.Path, "/protocol/openid-connect/token"):
+			_, _ = w.Write([]byte(`{"access_token":"DIRECT-TOKEN"}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	// Enabled is false, yet deviceLogin should still run the flow: judging that
+	// is the caller's job now.
+	disabled := &apiclient.AuthConfig{
+		Enabled:     false,
+		KeycloakURL: new(srv.URL),
+		Realm:       new("rossoctl"),
+		ClientID:    new("rossoctl-ui"),
+	}
+
+	cmd, _, err := rootCmd.Find([]string{"login"})
+	if err != nil {
+		t.Fatalf("login not found: %v", err)
+	}
+	cmd.SetContext(context.Background())
+
+	token, err := deviceLogin(cmd, disabled)
+	if err != nil {
+		t.Fatalf("deviceLogin should run the flow regardless of Enabled: %v", err)
+	}
+	if token != "DIRECT-TOKEN" {
+		t.Errorf("token = %q, want DIRECT-TOKEN", token)
+	}
+	if authConfigCalls != 0 {
+		t.Errorf("deviceLogin fetched /auth/config %d times; it should use the config it was given",
+			authConfigCalls)
 	}
 }
 

@@ -5,31 +5,21 @@ import (
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
-	"github.com/rossoctl/rossoctl-cli/internal/cortexclient"
 )
 
-func TestNewClientDispatchesOnType(t *testing.T) {
-	tests := []struct {
-		name    string
-		ctxType config.Type
-		want    string // "http" or "file"
-	}{
-		{"api", config.TypeAPI, "http"},
-		{"cortex", config.TypeCortex, "file"},
-		{"empty defaults to http", "", "http"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := NewClient(&config.Context{Type: tt.ctxType, Server: "http://x/api/v1/"})
-			switch tt.want {
-			case "http":
-				if _, ok := c.(*apiclient.Client); !ok {
-					t.Errorf("type %q: got %T, want *apiclient.Client", tt.ctxType, c)
-				}
-			case "file":
-				if _, ok := c.(*cortexclient.FileClient); !ok {
-					t.Errorf("type %q: got %T, want *cortexclient.FileClient", tt.ctxType, c)
-				}
+// TestNewClientIsAlwaysHTTP verifies every context type yields the HTTP client.
+// A cortex context is no exception: it is reached by pointing it at a
+// `rossoctl cortex serve` address, not by a separate file-backed client.
+func TestNewClientIsAlwaysHTTP(t *testing.T) {
+	for _, ctxType := range []config.Type{
+		config.TypeAPI,
+		config.TypeCortex,
+		"", // unset
+	} {
+		t.Run(string(ctxType), func(t *testing.T) {
+			c := NewClient(&config.Context{Type: ctxType, Server: "http://x/api/v1/"})
+			if _, ok := c.(*apiclient.Client); !ok {
+				t.Errorf("type %q: got %T, want *apiclient.Client", ctxType, c)
 			}
 		})
 	}
@@ -48,11 +38,14 @@ func TestNewClientCarriesContextFields(t *testing.T) {
 		t.Errorf("BearerToken = %q, want %q", c.BearerToken, ctx.BearerToken)
 	}
 
-	fc, ok := NewClient(&config.Context{Type: config.TypeCortex, Name: "mycortex"}).(*cortexclient.FileClient)
+	// A cortex context's server is honored the same way, so a context pointed at
+	// a local `cortex serve` reaches it rather than being routed elsewhere.
+	cortex := &config.Context{Type: config.TypeCortex, Name: "mycortex", Server: "http://localhost:9097/api/v1/"}
+	cc, ok := NewClient(cortex).(*apiclient.Client)
 	if !ok {
-		t.Fatalf("expected *cortexclient.FileClient")
+		t.Fatalf("expected *apiclient.Client for a cortex context, got %T", cc)
 	}
-	if fc.Name != "mycortex" {
-		t.Errorf("Name = %q, want %q", fc.Name, "mycortex")
+	if cc.BaseURL != cortex.Server {
+		t.Errorf("BaseURL = %q, want %q", cc.BaseURL, cortex.Server)
 	}
 }

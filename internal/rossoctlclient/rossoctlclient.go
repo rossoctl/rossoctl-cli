@@ -1,13 +1,11 @@
-// Package rossoctlclient defines the Rossoctl interface: the set of
-// operations the command layer needs from a backend, independent of whether
-// that backend is the live HTTP API (apiclient.Client) or a local file-backed
-// implementation (cortexclient.FileClient).
+// Package rossoctlclient defines the Rossoctl interface: the set of operations
+// the command layer needs from a backend.
 //
 // The interface mirrors the public methods of apiclient.Client and reuses that
-// package's request/response types, so both apiclient.Client and
-// cortexclient.FileClient satisfy Rossoctl without any adaptation. This package
-// imports both concrete backends so NewClient can dispatch on a context's type;
-// the backends therefore must not import this package (that would cycle).
+// package's request/response types, so that client satisfies Rossoctl without
+// any adaptation. It stays an interface rather than a concrete type so tests can
+// substitute a fake, and so a second backend could be added without touching
+// every caller.
 package rossoctlclient
 
 import (
@@ -15,7 +13,6 @@ import (
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
-	"github.com/rossoctl/rossoctl-cli/internal/cortexclient"
 )
 
 // Rossoctl is the backend contract used by the command layer. Its methods are
@@ -64,26 +61,20 @@ type Rossoctl interface {
 	ListNamespaces(ctx context.Context, enabledOnly bool) (*apiclient.NamespaceListResponse, error)
 }
 
-// Compile-time assertions that both backends implement Rossoctl.
-var (
-	_ Rossoctl = (*apiclient.Client)(nil)
-	_ Rossoctl = (*cortexclient.FileClient)(nil)
-)
+// Compile-time assertion that the HTTP client implements Rossoctl.
+var _ Rossoctl = (*apiclient.Client)(nil)
 
-// NewClient builds a Rossoctl backend for ctx, dispatching on its type:
+// NewClient builds a Rossoctl backend for ctx: an HTTP apiclient.Client for the
+// context's server and bearer token.
 //
-//   - TypeCortex returns a file-backed cortexclient.FileClient rooted at the
-//     context's server.
-//   - Any other type (including the empty type, treated as api for backward
-//     compatibility) returns an HTTP apiclient.Client for the context's server
-//     and bearer token.
+// Every context type reaches the API over HTTP, including TypeCortex. A cortex
+// context once had its own file-backed client reading agents.json directly; that
+// backend is gone, and a cortex is now reached the same way as any other server —
+// by pointing the context at a `rossoctl cortex serve` address.
 //
 // Verbose request logging is not wired here: callers that want it can type-
 // assert the result to *apiclient.Client and set its Logf field.
 func NewClient(ctx *config.Context) Rossoctl {
-	if ctx.Type == config.TypeCortex {
-		return cortexclient.NewFileClient(ctx.Name)
-	}
 	return &apiclient.Client{
 		BaseURL:     ctx.Server,
 		BearerToken: ctx.BearerToken,
