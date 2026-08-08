@@ -728,3 +728,141 @@ func TestAgentDetailIgnoresMCPInstances(t *testing.T) {
 		t.Error("the a2a instance in the same namespace should still be found")
 	}
 }
+
+// routeStatusPath is the route-status endpoint for one instance.
+func routeStatusPath(namespace, name string) string {
+	return "/api/v1/agents/" + namespace + "/" + name + "/route-status"
+}
+
+// TestRouteStatusReportsARoute verifies an existing a2a instance is reported as
+// having a route, in the documented envelope.
+func TestRouteStatusReportsARoute(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	resp, err := ts.Client().Get(ts.URL + routeStatusPath("recorded1", "swift-falcon-0001"))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	// Decoded into a map so the assertion covers the exact JSON shape the UI
+	// reads, not just a struct round-trip.
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := map[string]any{"hasRoute": true}
+	if len(got) != len(want) || got["hasRoute"] != true {
+		t.Errorf("body = %v, want exactly %v", got, want)
+	}
+}
+
+// TestRouteStatus404sWhereDetailDoes verifies route-status reports absence in
+// exactly the cases the detail endpoint does, which is what it is specified
+// against: a missing name, a wrong namespace, and an mcp instance.
+func TestRouteStatus404sWhereDetailDoes(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	for _, tc := range []struct{ name, namespace, instance string }{
+		{"missing name", "recorded1", "gone"},
+		{"wrong namespace", "recorded2", "swift-falcon-0001"},
+		{"mcp instance is not an agent", "recorded1", "calm-harbor-0002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both endpoints are asked, and the assertion is that they agree —
+			// pinning the pair rather than each one's status independently.
+			detailResp, err := ts.Client().Get(ts.URL + "/api/v1/agents/" + tc.namespace + "/" + tc.instance)
+			if err != nil {
+				t.Fatalf("GET detail: %v", err)
+			}
+			detailResp.Body.Close()
+
+			routeResp, err := ts.Client().Get(ts.URL + routeStatusPath(tc.namespace, tc.instance))
+			if err != nil {
+				t.Fatalf("GET route-status: %v", err)
+			}
+			routeResp.Body.Close()
+
+			if detailResp.StatusCode != http.StatusNotFound {
+				t.Errorf("detail status = %d, want %d", detailResp.StatusCode, http.StatusNotFound)
+			}
+			if routeResp.StatusCode != detailResp.StatusCode {
+				t.Errorf("route-status = %d, detail = %d; the two must agree",
+					routeResp.StatusCode, detailResp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestRouteStatusReadFailureIsAnError verifies an unreadable record is a 500
+// rather than a 404, matching the detail endpoint: "no route" and "cannot tell"
+// are different answers.
+func TestRouteStatusReadFailureIsAnError(t *testing.T) {
+	stubGetterErr(t, errors.New("permission denied"))
+	ts := newTestServer(t, "/api/v1")
+
+	resp, err := ts.Client().Get(ts.URL + routeStatusPath("recorded1", "swift-falcon-0001"))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+// TestRouteStatusIsReadPerRequest verifies the record is consulted on every
+// request, so an instance that stops while the server runs stops reporting a
+// route without a restart.
+func TestRouteStatusIsReadPerRequest(t *testing.T) {
+	insts := mixedInstances()
+	stubGetter(t, insts)
+	ts := newTestServer(t, "/api/v1")
+
+	first, err := ts.Client().Get(ts.URL + routeStatusPath("recorded1", "swift-falcon-0001"))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d, want %d", first.StatusCode, http.StatusOK)
+	}
+
+	// The instance goes away.
+	stubGetter(t, nil)
+	second, err := ts.Client().Get(ts.URL + routeStatusPath("recorded1", "swift-falcon-0001"))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	second.Body.Close()
+	if second.StatusCode != http.StatusNotFound {
+		t.Errorf("second status = %d, want %d after the instance stopped",
+			second.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestToolRouteStatusStillUnimplemented verifies the tools route-status endpoint
+// was not implemented by implementing the agents one; only the agents endpoint
+// was asked for.
+func TestToolRouteStatusStillUnimplemented(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	resp, err := ts.Client().Get(ts.URL + "/api/v1/tools/recorded1/calm-harbor-0002/route-status")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+}

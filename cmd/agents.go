@@ -171,7 +171,10 @@ func init() {
 	agentsListCmd.Flags().BoolVar(&agentsListJSON, "json", false, "print the raw JSON response unchanged")
 	agentsListCmd.Flags().BoolVarP(&agentsListAllNamespaces, "all-namespaces", "A", false, "list agents across all namespaces discovered from the server")
 
+	agentsCardCmd.Flags().BoolVar(&agentsCardJSON, "json", false, "print the raw JSON response unchanged")
+
 	agentsCmd.AddCommand(
+		agentsCardCmd,
 		newLeaf("chat [name]", "Start an interactive chat with an agent"),
 		agentsDeleteCmd,
 		newAgentsImportCmd(),

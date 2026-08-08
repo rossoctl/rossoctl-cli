@@ -67,6 +67,9 @@ func newAgentGetServer(t *testing.T, body string, status int) *httptest.Server {
 				w.WriteHeader(status)
 			}
 			_, _ = w.Write([]byte(body))
+		case "/api/v1/agents/team1/orders/route-status":
+			// `agents get` reports the external route, so it asks for this too.
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
 		default:
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
@@ -153,6 +156,10 @@ func TestAgentsGetNamespaceOverride(t *testing.T) {
 			_, _ = w.Write([]byte(`{"namespaces":["team1","team2"]}`))
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/route-status") {
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
+			return
+		}
 		gotPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"metadata":{"name":"orders","namespace":"team2"},"spec":{},"status":{},"workloadType":"deployment","readyStatus":"Ready"}`))
 	}))
@@ -188,6 +195,10 @@ func TestAgentsGetNamespaceFlagSuppliesWhenContextHasNone(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/route-status") {
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
+			return
+		}
 		gotPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"metadata":{"name":"orders","namespace":"team9"},"spec":{},"status":{},"workloadType":"deployment","readyStatus":"Ready"}`))
 	}))
@@ -233,11 +244,204 @@ func TestAgentsGetMinimalAgent(t *testing.T) {
 			t.Errorf("minimal output missing %q:\n%s", want, out)
 		}
 	}
-	// No Endpoint/Source sections when the data is absent.
-	if strings.Contains(out, "Endpoint") {
-		t.Errorf("Endpoint section should be omitted when no service:\n%s", out)
+	// No Service fields when there is no service. The Endpoint section itself
+	// may still appear, carrying the external route, which is a property of the
+	// agent rather than of its Service — but nothing about a Service that is
+	// not there.
+	for _, absent := range []string{"Service:", "Cluster IP:", "Ports:"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("%q should be omitted when there is no service:\n%s", absent, out)
+		}
 	}
 	if strings.Contains(out, "Source") {
 		t.Errorf("Source section should be omitted when no git source:\n%s", out)
+	}
+}
+
+// newAgentGetRouteServer serves the detail path plus a route-status endpoint
+// whose status code and body the caller controls, so the tri-state rendering can
+// be exercised.
+func newAgentGetRouteServer(t *testing.T, routeStatus int, routeBody string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case strings.HasSuffix(r.URL.Path, "/route-status"):
+			if routeStatus != 0 {
+				w.WriteHeader(routeStatus)
+			}
+			_, _ = w.Write([]byte(routeBody))
+		case r.URL.Path == "/api/v1/agents/team1/orders":
+			_, _ = w.Write([]byte(agentDetailBody))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestAgentsGetReportsRoute verifies a route is reported in the Endpoint
+// section.
+func TestAgentsGetReportsRoute(t *testing.T) {
+	isolateHome(t)
+	srv := newAgentGetRouteServer(t, 0, `{"hasRoute":true}`)
+	setupAgentGetContext(t, srv)
+
+	out, err := execute(t, "agents", "get", "orders")
+	if err != nil {
+		t.Fatalf("agents get: %v", err)
+	}
+	var routeLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "External Route:") {
+			routeLine = strings.TrimSpace(line)
+		}
+	}
+	if routeLine == "" {
+		t.Fatalf("output does not report the route:\n%s", out)
+	}
+	if !strings.HasSuffix(routeLine, "Yes") {
+		t.Errorf("route line = %q, want it to end in Yes", routeLine)
+	}
+}
+
+// TestAgentsGetReportsNoRoute verifies an agent without a route says so, rather
+// than omitting the line — false is an answer.
+func TestAgentsGetReportsNoRoute(t *testing.T) {
+	isolateHome(t)
+	srv := newAgentGetRouteServer(t, 0, `{"hasRoute":false}`)
+	setupAgentGetContext(t, srv)
+
+	out, err := execute(t, "agents", "get", "orders")
+	if err != nil {
+		t.Fatalf("agents get: %v", err)
+	}
+	// The line must be present and say No: hasRoute=false is a real answer, so
+	// omitting it would lose information the server did supply.
+	var routeLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "External Route:") {
+			routeLine = strings.TrimSpace(line)
+		}
+	}
+	if routeLine == "" {
+		t.Fatalf("output does not report the route:\n%s", out)
+	}
+	if !strings.HasSuffix(routeLine, "No") {
+		t.Errorf("route line = %q, want it to end in No", routeLine)
+	}
+}
+
+// TestAgentsGetSurvivesRouteStatusFailure verifies a failing route-status call
+// does not fail the command: the agent was fetched successfully, and one
+// unavailable line is not worth discarding the whole report over.
+//
+// This also covers a server predating the endpoint, which answers 404.
+func TestAgentsGetSurvivesRouteStatusFailure(t *testing.T) {
+	isolateHome(t)
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		srv := newAgentGetRouteServer(t, status, `{"detail":"nope"}`)
+		setupAgentGetContext(t, srv)
+
+		out, err := execute(t, "agents", "get", "orders")
+		if err != nil {
+			t.Fatalf("agents get with route-status %d should still succeed: %v", status, err)
+		}
+		// The agent's own details are still reported in full.
+		if !strings.Contains(out, "Agent Information") || !strings.Contains(out, "orders") {
+			t.Errorf("route-status %d lost the agent detail:\n%s", status, out)
+		}
+		// And the route is not asserted either way: an unknown status gets no
+		// line, rather than a "No" that would claim the agent has no route when
+		// the question was never answered.
+		if strings.Contains(out, "External Route") {
+			t.Errorf("route-status %d should produce no route line, got:\n%s", status, out)
+		}
+	}
+}
+
+// TestAgentsGetJSONSkipsRouteStatus verifies --json prints the server's agent
+// payload unchanged, without the route grafted into it: the flag is documented
+// as the raw response, and a synthesized field would make it a different
+// document from what the server sent.
+func TestAgentsGetJSONSkipsRouteStatus(t *testing.T) {
+	isolateHome(t)
+	var askedRoute bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case strings.HasSuffix(r.URL.Path, "/route-status"):
+			askedRoute = true
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
+		default:
+			_, _ = w.Write([]byte(agentDetailBody))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	setupAgentGetContext(t, srv)
+
+	out, err := execute(t, "agents", "get", "orders", "--json")
+	if err != nil {
+		t.Fatalf("agents get --json: %v", err)
+	}
+	if askedRoute {
+		t.Error("--json should not request route-status; it prints the raw agent response")
+	}
+	if strings.Contains(out, "hasRoute") {
+		t.Errorf("--json output should not carry a synthesized route field:\n%s", out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v", err)
+	}
+}
+
+// TestAgentsGetRouteWithoutService verifies the route is still reported for an
+// agent that has no Service. The route is a property of the agent, not of its
+// Service, so it must not vanish just because there is nothing to print beside.
+func TestAgentsGetRouteWithoutService(t *testing.T) {
+	isolateHome(t)
+	body := `{
+		"metadata": {"name": "orders", "namespace": "team1", "labels": {}, "annotations": {}},
+		"spec": {}, "status": {}, "workloadType": "deployment", "readyStatus": "Ready"
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case strings.HasSuffix(r.URL.Path, "/route-status"):
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
+		default:
+			_, _ = w.Write([]byte(body))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	setupAgentGetContext(t, srv)
+
+	out, err := execute(t, "agents", "get", "orders")
+	if err != nil {
+		t.Fatalf("agents get: %v", err)
+	}
+	if !strings.Contains(out, "Endpoint") {
+		t.Errorf("Endpoint section should carry the route even with no Service:\n%s", out)
+	}
+	var routeLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "External Route:") {
+			routeLine = strings.TrimSpace(line)
+		}
+	}
+	if !strings.HasSuffix(routeLine, "Yes") {
+		t.Errorf("route line = %q, want it to end in Yes", routeLine)
+	}
+	// Still no Service fields invented for an agent that has none.
+	if strings.Contains(out, "Service:") || strings.Contains(out, "Cluster IP:") {
+		t.Errorf("no Service fields should appear:\n%s", out)
 	}
 }

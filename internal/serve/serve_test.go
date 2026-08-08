@@ -75,11 +75,12 @@ func TestAuthConfigReportsDisabled(t *testing.T) {
 // Keyed by "METHOD PATH" rather than by Route: a Route carries a handler
 // function, which makes it incomparable and so unusable as a map key.
 var implementedRoutes = map[string]bool{
-	http.MethodGet + " /auth/config":               true,
-	http.MethodGet + " /namespaces":                true,
-	http.MethodGet + " /agents":                    true,
-	http.MethodGet + " /tools":                     true,
-	http.MethodGet + " /agents/{namespace}/{name}": true,
+	http.MethodGet + " /auth/config":                            true,
+	http.MethodGet + " /namespaces":                             true,
+	http.MethodGet + " /agents":                                 true,
+	http.MethodGet + " /tools":                                  true,
+	http.MethodGet + " /agents/{namespace}/{name}":              true,
+	http.MethodGet + " /agents/{namespace}/{name}/route-status": true,
 }
 
 // routeKey is the implementedRoutes key for r.

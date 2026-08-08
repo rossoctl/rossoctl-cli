@@ -353,6 +353,73 @@ func (c *Client) GetAgent(ctx context.Context, namespace, name string) (*AgentDe
 	return &detail, nil
 }
 
+// RouteStatus mirrors the backend's GET
+// /agents/{namespace}/{name}/route-status response, which reports whether an
+// HTTPRoute exposes the workload.
+//
+// The published OpenAPI document types the response as a free-form object, so
+// the field name comes from the server and the web UI, both of which use
+// hasRoute.
+type RouteStatus struct {
+	HasRoute bool `json:"hasRoute"`
+}
+
+// GetAgentRouteStatus fetches GET /agents/<namespace>/<name>/route-status.
+func (c *Client) GetAgentRouteStatus(ctx context.Context, namespace, name string) (*RouteStatus, error) {
+	path := "agents/" + url.PathEscape(namespace) + "/" + url.PathEscape(name) + "/route-status"
+
+	var status RouteStatus
+	if err := c.getJSON(ctx, path, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// AgentCardSkill is one entry in an AgentCard's skills list.
+type AgentCardSkill struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	Examples    []string `json:"examples"`
+}
+
+// AgentCard mirrors the backend's AgentCardResponse (GET
+// /chat/{namespace}/{name}/agent-card): the A2A agent card as served by the
+// agent itself, fetched through the backend.
+//
+// These are exactly the fields the backend's response model declares. An A2A
+// card served by an agent carries more — protocolVersion, preferredTransport,
+// defaultInputModes and so on — but the backend reshapes the card into this
+// model before answering, so those never reach a client and are not decoded
+// here. Note that Streaming is flattened to the top level, where the A2A card
+// itself nests it under "capabilities".
+//
+// Only Name, Version and URL are required; Description and Skills are optional
+// and Streaming defaults to false.
+type AgentCard struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Version     string           `json:"version"`
+	URL         string           `json:"url"`
+	Streaming   bool             `json:"streaming"`
+	Skills      []AgentCardSkill `json:"skills"`
+}
+
+// GetAgentCard fetches GET /chat/<namespace>/<name>/agent-card.
+//
+// Note the path is under /chat, not /agents: the backend proxies the request to
+// the running agent, so a card is only available while the agent is up.
+func (c *Client) GetAgentCard(ctx context.Context, namespace, name string) (*AgentCard, error) {
+	path := "chat/" + url.PathEscape(namespace) + "/" + url.PathEscape(name) + "/agent-card"
+
+	var card AgentCard
+	if err := c.getJSON(ctx, path, &card); err != nil {
+		return nil, err
+	}
+	return &card, nil
+}
+
 // DeleteResponse mirrors the backend's DeleteResponse model.
 type DeleteResponse struct {
 	Success bool   `json:"success"`

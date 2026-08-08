@@ -3,7 +3,7 @@
 // The API surface mirrors the OpenAPI document the real backend publishes at
 // /api/openapi.json: every operation in that document is routed here, so a UI
 // pointed at this server sees the same set of endpoints rather than a wall of
-// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Five are real:
+// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Six are real:
 //
 //   - GET /auth/config reports authentication as disabled, so a UI can finish
 //     initializing without a Keycloak realm behind it.
@@ -12,6 +12,9 @@
 //     inbound protocol is a2a.
 //   - GET /tools reports the same for instances whose inbound protocol is mcp.
 //   - GET /agents/{namespace}/{name} reports one instance in detail.
+//   - GET /agents/{namespace}/{name}/route-status reports that an existing
+//     instance has a route, since one reached at its inbound address always
+//     does; it 404s exactly when the detail endpoint does.
 //
 // The instance endpoints read the instances directory on every request rather
 // than once at startup: instances are started and stopped by `authbridge exec`
@@ -112,7 +115,7 @@ var apiRoutes = []Route{
 	{http.MethodGet, "/agents/{namespace}/{name}/identity-config", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/identity-status", unimplemented},
 	{http.MethodPost, "/agents/{namespace}/{name}/migrate", unimplemented},
-	{http.MethodGet, "/agents/{namespace}/{name}/route-status", unimplemented},
+	{http.MethodGet, "/agents/{namespace}/{name}/route-status", agentRouteStatusRoute},
 	{http.MethodGet, "/agents/{namespace}/{name}/shipwright-build", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/shipwright-build-info", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/shipwright-buildrun", unimplemented},
@@ -537,29 +540,72 @@ func agentDetailRoute(opts) http.HandlerFunc {
 // agentDetailRoute.
 func instanceDetailHandler(proto instances.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		namespace, name := r.PathValue("namespace"), r.PathValue("name")
-
-		notFound := func() {
-			writeJSON(w, http.StatusNotFound, map[string]string{
-				"detail": fmt.Sprintf("no %s instance %q in namespace %q is running", proto, name, namespace),
-			})
-		}
-
-		inst, err := getter(namespace, name)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				notFound()
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError,
-				map[string]string{"detail": fmt.Sprintf("reading local instance: %v", err)})
-			return
-		}
-		if inst.InboundProtocol != proto {
-			notFound()
+		inst, ok := lookupInstance(w, r, proto)
+		if !ok {
 			return
 		}
 		writeJSON(w, http.StatusOK, detail(*inst))
+	}
+}
+
+// lookupInstance resolves the {namespace}/{name} pair of a detail-style request
+// to one instance of the given protocol, writing the error response and
+// reporting false when it cannot.
+//
+// Shared by the detail and route-status endpoints so the two cannot disagree
+// about what exists: route-status is specified to 404 exactly when the detail
+// endpoint would, and a second copy of this lookup would only stay in agreement
+// by coincidence.
+func lookupInstance(w http.ResponseWriter, r *http.Request, proto instances.Protocol) (*instances.Instance, bool) {
+	namespace, name := r.PathValue("namespace"), r.PathValue("name")
+
+	notFound := func() {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"detail": fmt.Sprintf("no %s instance %q in namespace %q is running", proto, name, namespace),
+		})
+	}
+
+	inst, err := getter(namespace, name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			notFound()
+			return nil, false
+		}
+		writeJSON(w, http.StatusInternalServerError,
+			map[string]string{"detail": fmt.Sprintf("reading local instance: %v", err)})
+		return nil, false
+	}
+	if inst.InboundProtocol != proto {
+		notFound()
+		return nil, false
+	}
+	return inst, true
+}
+
+// RouteStatus is the GET /agents/{namespace}/{name}/route-status response,
+// reporting whether an HTTPRoute exposes the instance.
+type RouteStatus struct {
+	HasRoute bool `json:"hasRoute"`
+}
+
+// agentRouteStatusRoute serves GET /agents/{namespace}/{name}/route-status.
+//
+// HasRoute is unconditionally true for an instance that exists. This server
+// reports `authbridge exec` instances, which are reached at the inbound address
+// the record names — there is no Gateway API in the picture and so nothing that
+// could be absent, which makes "does it have a route" degenerate here. Reporting
+// false would be read as "not exposed", which is the opposite of the truth for a
+// running instance.
+//
+// The existence check is delegated to the same lookup the detail endpoint uses,
+// so this 404s exactly when that does — including for an mcp instance, which is
+// not an agent on either endpoint.
+func agentRouteStatusRoute(opts) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := lookupInstance(w, r, instances.ProtocolA2A); !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, RouteStatus{HasRoute: true})
 	}
 }
 

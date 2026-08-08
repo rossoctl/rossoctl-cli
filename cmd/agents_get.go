@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
+	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
 )
 
 var agentsGetJSON bool
@@ -49,15 +50,44 @@ by the server is printed unchanged.`,
 			return enc.Encode(agent)
 		}
 
-		printAgentDetail(cmd.OutOrStdout(), agent)
+		printAgentDetail(cmd.OutOrStdout(), agent, agentRouteStatus(cmd, client, namespace, name))
 		return nil
 	},
+}
+
+// agentRouteStatus reports whether an HTTPRoute exposes the agent, or nil when
+// that could not be determined.
+//
+// A failure is not propagated: the route is one line of a report whose subject
+// was already fetched successfully, so failing the whole command over it would
+// turn a complete-but-for-one-line answer into no answer at all.
+//
+// The distinction between nil and false matters. An older server without the
+// endpoint answers 404, which is indistinguishable here from a real absence, so
+// nil means "not learned" and the caller omits the line entirely. Rendering "No"
+// would state as fact something that was never checked.
+//
+// The error is surfaced under --verbose so a missing line can be traced. The web
+// UI makes the same call but coerces any failure to false, which is why it can
+// show "no route" for a server it simply could not reach.
+func agentRouteStatus(cmd *cobra.Command, client rossoctlclient.Rossoctl, namespace, name string) *bool {
+	status, err := client.GetAgentRouteStatus(cmd.Context(), namespace, name)
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(cmd.ErrOrStderr(), "route status unavailable: %v\n", err)
+		}
+		return nil
+	}
+	return &status.HasRoute
 }
 
 // printAgentDetail renders an agent as single-column text, mirroring the
 // section structure of the web UI's AgentDetailPage (header, Agent
 // Information, Endpoint, Source, Status).
-func printAgentDetail(out io.Writer, a *apiclient.AgentDetail) {
+//
+// hasRoute reports whether an HTTPRoute exposes the agent; nil means it could
+// not be determined, in which case no route line is printed at all.
+func printAgentDetail(out io.Writer, a *apiclient.AgentDetail, hasRoute *bool) {
 	// Header: name and ready status, then protocols.
 	fmt.Fprintf(out, "%s\n", a.Metadata.Name)
 	status := a.ReadyStatus
@@ -84,6 +114,11 @@ func printAgentDetail(out io.Writer, a *apiclient.AgentDetail) {
 	rows.flush(out)
 
 	// Endpoint (Service info, when present).
+	//
+	// The external route is reported here, beside the Service, because both
+	// answer "how is this reached". It is only reported when known: an
+	// unavailable route status adds no line rather than a hedged one, so output
+	// against a server that does not serve the endpoint reads as it did before.
 	if a.Service != nil {
 		section(out, "Endpoint")
 		r := newRows()
@@ -100,6 +135,18 @@ func printAgentDetail(out io.Writer, a *apiclient.AgentDetail) {
 			}
 			r.add("Ports", strings.Join(ports, ", "))
 		}
+		if hasRoute != nil {
+			r.add("External Route", routeLabel(*hasRoute))
+		}
+		r.flush(out)
+	} else if hasRoute != nil {
+		// No Service to hang it on, but the route is still worth reporting: it
+		// is a property of the agent, not of its Service. A section of its own
+		// rather than a line in Agent Information, so the Endpoint heading means
+		// the same thing in both branches.
+		section(out, "Endpoint")
+		r := newRows()
+		r.add("External Route", routeLabel(*hasRoute))
 		r.flush(out)
 	}
 
@@ -138,6 +185,16 @@ func printAgentDetail(out io.Writer, a *apiclient.AgentDetail) {
 }
 
 // --- small rendering helpers ---
+
+// routeLabel renders a known route status. Callers must check for nil first: an
+// unknown status has no line at all rather than a label, so there is deliberately
+// no third string here to reach for.
+func routeLabel(hasRoute bool) string {
+	if hasRoute {
+		return "Yes"
+	}
+	return "No"
+}
 
 // rows accumulates aligned "Term: value" lines and flushes them through a
 // tabwriter so the values line up in a single column.

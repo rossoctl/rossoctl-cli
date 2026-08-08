@@ -35,13 +35,15 @@ var cortexServeCmd = &cobra.Command{
 
 The server exposes the same set of operations as the backend's published
 OpenAPI document, so a UI pointed at it finds every endpoint it expects. Most
-are placeholders that answer 500 UNIMPLEMENTED. Five are real:
+are placeholders that answer 500 UNIMPLEMENTED. Six are real:
 
   GET /auth/config              reports authentication as disabled
   GET /namespaces               reports --namespaces
   GET /agents                   lists the locally running a2a instances
   GET /tools                    lists the locally running mcp instances
   GET /agents/{ns}/{name}       reports one instance in detail
+  GET /agents/{ns}/{name}/route-status
+                                reports that an existing instance has a route
 
 The instance endpoints read the records "authbridge exec" writes under
 ~/.config/rossocortex/namespaces/<namespace>, once per request, so an instance

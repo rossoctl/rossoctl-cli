@@ -28,6 +28,12 @@ func newContextTestServer(t *testing.T, namespaces string) *contextTestServer {
 			c.auth = r.Header.Get("Authorization")
 			c.listedNS = r.URL.Query().Get("namespace")
 			_, _ = w.Write([]byte(`{"items":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/route-status"):
+			// `agents get` asks for this too, to report the external route. It is
+			// deliberately not recorded in getPath, which these tests use to check
+			// which namespace the detail request went to.
+			c.auth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"hasRoute":true}`))
 		case strings.HasPrefix(r.URL.Path, "/api/v1/agents/"):
 			c.auth = r.Header.Get("Authorization")
 			c.getPath = r.URL.Path

@@ -38,6 +38,13 @@ type Rossoctl interface {
 	// GetAgent fetches a single agent by namespace and name.
 	GetAgent(ctx context.Context, namespace, name string) (*apiclient.AgentDetail, error)
 
+	// GetAgentRouteStatus reports whether an HTTPRoute exposes the agent.
+	GetAgentRouteStatus(ctx context.Context, namespace, name string) (*apiclient.RouteStatus, error)
+
+	// GetAgentCard fetches the agent's A2A card, which the backend proxies from
+	// the running agent.
+	GetAgentCard(ctx context.Context, namespace, name string) (*apiclient.AgentCard, error)
+
 	// DeleteAgent deletes an agent by namespace and name.
 	DeleteAgent(ctx context.Context, namespace, name string) (*apiclient.DeleteResponse, error)
 
