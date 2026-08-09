@@ -81,6 +81,7 @@ var implementedRoutes = map[string]bool{
 	http.MethodGet + " /tools":                                  true,
 	http.MethodGet + " /agents/{namespace}/{name}":              true,
 	http.MethodGet + " /agents/{namespace}/{name}/route-status": true,
+	http.MethodGet + " /chat/{namespace}/{name}/agent-card":     true,
 }
 
 // routeKey is the implementedRoutes key for r.

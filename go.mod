@@ -12,6 +12,7 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/a2aproject/a2a-go v0.3.15 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/alexaandru/go-sitter-forest/c v1.9.4 // indirect
 	github.com/alexaandru/go-sitter-forest/c_sharp v1.9.6 // indirect
@@ -117,6 +118,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect

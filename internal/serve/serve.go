@@ -129,7 +129,7 @@ var apiRoutes = []Route{
 	{http.MethodGet, "/auth/userinfo", unimplemented},
 
 	// chat
-	{http.MethodGet, "/chat/{namespace}/{name}/agent-card", unimplemented},
+	{http.MethodGet, "/chat/{namespace}/{name}/agent-card", agentCardRoute},
 	{http.MethodPost, "/chat/{namespace}/{name}/send", unimplemented},
 	{http.MethodPost, "/chat/{namespace}/{name}/stream", unimplemented},
 
