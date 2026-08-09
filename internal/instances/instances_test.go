@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // isolateHome points the instances directory at a temp directory, mirroring the
@@ -183,6 +184,66 @@ func TestCreateGeneratesIDAndName(t *testing.T) {
 	// The default protocol applies rather than an empty string reaching the file.
 	if h.Instance.InboundProtocol != DefaultProtocol {
 		t.Errorf("protocol = %q, want the default %q", h.Instance.InboundProtocol, DefaultProtocol)
+	}
+}
+
+// TestCreateStampsCreationTime verifies a record gets a machine-readable creation
+// time, in the format and timezone the field promises.
+//
+// The value is checked by parsing rather than by matching a pattern, and then
+// compared against the surrounding wall clock: a format string that produced a
+// valid-looking timestamp from the wrong clock reading (a zero time, or a local
+// time labelled Z) would satisfy a regexp but not this.
+func TestCreateStampsCreationTime(t *testing.T) {
+	isolateHome(t)
+
+	// Truncated because the recorded value is, so a Create in the first half of a
+	// second would otherwise appear to predate this bound.
+	before := time.Now().UTC().Truncate(time.Second)
+	h, err := Create(Instance{CommandLine: []string{"true"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	after := time.Now().UTC()
+
+	got, err := time.Parse(time.RFC3339, h.Instance.CreationTimestamp)
+	if err != nil {
+		t.Fatalf("creation timestamp %q is not RFC 3339: %v", h.Instance.CreationTimestamp, err)
+	}
+	if got.Before(before) || got.After(after) {
+		t.Errorf("creation timestamp = %v, want between %v and %v", got, before, after)
+	}
+
+	// UTC, not the local offset: these records are compared across hosts. Asserting
+	// on the string because a parsed time compares equal regardless of offset, so
+	// only the recorded text can show which zone was written.
+	if !strings.HasSuffix(h.Instance.CreationTimestamp, "Z") {
+		t.Errorf("creation timestamp = %q, want a UTC (Z) offset", h.Instance.CreationTimestamp)
+	}
+
+	// And it reached the file, not just the returned handle.
+	loaded, err := Load(h.Path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.CreationTimestamp != h.Instance.CreationTimestamp {
+		t.Errorf("file has %q, handle has %q", loaded.CreationTimestamp, h.Instance.CreationTimestamp)
+	}
+}
+
+// TestCreateHonorsSuppliedCreationTime verifies Create fills the timestamp only
+// when it is empty, so a caller rebuilding a record keeps the original time rather
+// than having it reset to now.
+func TestCreateHonorsSuppliedCreationTime(t *testing.T) {
+	isolateHome(t)
+
+	const original = "2020-01-02T03:04:05Z"
+	h, err := Create(Instance{CommandLine: []string{"true"}, CreationTimestamp: original})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if h.Instance.CreationTimestamp != original {
+		t.Errorf("creation timestamp = %q, want the supplied %q", h.Instance.CreationTimestamp, original)
 	}
 }
 

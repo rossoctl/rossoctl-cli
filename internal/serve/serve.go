@@ -46,6 +46,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/rossoctl/rossoctl-cli/internal/agentapi"
 	"github.com/rossoctl/rossoctl-cli/internal/instances"
 )
 
@@ -191,69 +192,41 @@ type NamespaceList struct {
 	Namespaces []string `json:"namespaces"`
 }
 
-// ResourceLabels is the labels block of a summary entry, mirroring the
-// backend's ResourceLabels schema. Framework and Type are nullable there, so
-// they are pointers and encode as null when unknown — which they are for a
-// locally hosted instance, since nothing declares them.
-type ResourceLabels struct {
-	Protocol  []string `json:"protocol"`
-	Framework *string  `json:"framework"`
-	Type      *string  `json:"type"`
-}
-
-// ResourceSummary is one entry in a GET /agents or GET /tools response,
-// mirroring the backend's AgentSummary and ToolSummary schemas. Those two have
-// the same shape, so one type serves both.
+// The response types are the shared ones from internal/agentapi, which the CLI's
+// apiclient decodes into. This server stands in for the backend, so the shapes it
+// emits are the shapes that client expects by construction rather than by a
+// matching pair of struct definitions that have to be kept in step by hand.
 //
-// WorkloadType and CreatedAt are nullable in the schema and stay null here: an
-// instance is a local process, not a cluster workload, and its record carries no
-// start time.
-type ResourceSummary struct {
-	Name         string         `json:"name"`
-	Namespace    string         `json:"namespace"`
-	Description  string         `json:"description"`
-	Status       string         `json:"status"`
-	Labels       ResourceLabels `json:"labels"`
-	WorkloadType *string        `json:"workloadType"`
-	CreatedAt    *string        `json:"createdAt"`
-}
+// The local names are kept as aliases because "Resource" reads better here than
+// "Agent" does: one type serves both /agents and /tools, whose schemas have the
+// same shape.
+//
+// A local instance is not a cluster workload, so most of the nullable cluster
+// fields stay null: Framework and Type are undeclared for a hosted process, and
+// Service is nil rather than naming a ClusterIP nothing would answer on.
+//
+// The exception is a creation timestamp, which a record does carry. Both halves
+// report it: detail fills ResourceMetadata.CreationTimestamp and summarize fills
+// ResourceSummary.CreatedAt, from the same field. One endpoint knowing a start
+// time while the other calls it unknown would be a difference a reader could only
+// explain by reading this server's source.
+type (
+	ResourceLabels   = agentapi.ResourceLabels
+	ResourceSummary  = agentapi.AgentSummary
+	ResourceMetadata = agentapi.AgentMetadata
+	ResourceDetail   = agentapi.AgentDetail
+)
 
 // ResourceList is a GET /agents or GET /tools response, mirroring the backend's
 // AgentListResponse and ToolListResponse schemas. The slice is always emitted,
 // as an empty array rather than null, because the schema marks it required.
+//
+// This envelope stays local rather than moving to agentapi. The client declares
+// one type per endpoint (AgentListResponse and ToolListResponse) because they are
+// separate schemas that could diverge; this server needs only the shape they
+// currently share. Both encode identically, so the wire result is the same.
 type ResourceList struct {
 	Items []ResourceSummary `json:"items"`
-}
-
-// ResourceMetadata is the metadata block of a detail response, mirroring the
-// backend's metadata schema. CreationTimestamp is nullable and stays null: an
-// instance record carries no start time.
-type ResourceMetadata struct {
-	Name              string            `json:"name"`
-	Namespace         string            `json:"namespace"`
-	Labels            map[string]string `json:"labels"`
-	Annotations       map[string]string `json:"annotations"`
-	CreationTimestamp *string           `json:"creationTimestamp"`
-	UID               *string           `json:"uid"`
-}
-
-// ResourceDetail is the GET /agents/{namespace}/{name} response, mirroring the
-// backend's AgentDetailResponse schema.
-//
-// Spec and Status are open maps in that schema — the backend fills them from a
-// Kubernetes custom resource, which has no fixed shape here — so the instance's
-// own fields go into them under names the CLI's renderer already reads.
-//
-// WorkloadType and Service describe cluster deployment. An instance is a local
-// process, so the workload type says so and Service is null rather than naming a
-// ClusterIP nothing would answer on.
-type ResourceDetail struct {
-	Metadata     ResourceMetadata `json:"metadata"`
-	Spec         map[string]any   `json:"spec"`
-	Status       map[string]any   `json:"status"`
-	WorkloadType string           `json:"workloadType"`
-	ReadyStatus  string           `json:"readyStatus"`
-	Service      any              `json:"service"`
 }
 
 // Server is a configured API server. Build one with New, then call
@@ -584,9 +557,7 @@ func lookupInstance(w http.ResponseWriter, r *http.Request, proto instances.Prot
 
 // RouteStatus is the GET /agents/{namespace}/{name}/route-status response,
 // reporting whether an HTTPRoute exposes the instance.
-type RouteStatus struct {
-	HasRoute bool `json:"hasRoute"`
-}
+type RouteStatus = agentapi.RouteStatus
 
 // agentRouteStatusRoute serves GET /agents/{namespace}/{name}/route-status.
 //
@@ -631,7 +602,31 @@ func summarize(inst instances.Instance) ResourceSummary {
 			// The protocol is the one label an instance record really carries.
 			Protocol: []string{string(inst.InboundProtocol)},
 		},
+		// The same field the detail reports as metadata.creationTimestamp. The two
+		// schemas spell it differently — createdAt here, creationTimestamp there —
+		// but it is one fact, so it comes from one place.
+		CreatedAt: creationTimestamp(inst),
 	}
+}
+
+// creationTimestamp is the record's creation time as a nullable wire field, shared
+// by the listing's createdAt and the detail's metadata.creationTimestamp.
+//
+// Nil rather than a pointer to "" for a record written before the field existed:
+// both schemas make this nullable, and null reads as "unknown", which is true. An
+// empty string would render as a blank Created line, which reads as a broken
+// server rather than an old record.
+//
+// The value is passed through verbatim rather than reparsed and reformatted. The
+// record already holds RFC 3339, which is what these fields are, and reformatting
+// would mean deciding what to emit for a hand-edited record that does not parse —
+// where forwarding the text lets the reader see what was actually written.
+func creationTimestamp(inst instances.Instance) *string {
+	if inst.CreationTimestamp == "" {
+		return nil
+	}
+	ts := inst.CreationTimestamp
+	return &ts
 }
 
 // instanceStatus is the status every reported instance carries. The record's
@@ -694,6 +689,16 @@ func detail(inst instances.Instance) ResourceDetail {
 			"reason":  "InstanceRecorded",
 			"message": "an authbridge exec instance record is present for this name",
 		}},
+
+		// A hosted instance is one process, and its record existing is what makes
+		// it ready — so it is 1/1 rather than the 0/1 an absent field renders as.
+		// spec.replicas is left unset, which readers default to 1.
+		//
+		// Only readyReplicas: availableReplicas is a Deployment's count of replicas
+		// past their minimum-ready deadline, which has no meaning for a local
+		// process, and setting it would add an "(1 available)" clause claiming a
+		// rollout guarantee nothing here provides.
+		"readyReplicas": 1,
 	}
 	if inst.PID != 0 {
 		status["pid"] = inst.PID
@@ -710,8 +715,9 @@ func detail(inst instances.Instance) ResourceDetail {
 			Labels: map[string]string{
 				protocolLabel + string(inst.InboundProtocol): "true",
 			},
-			Annotations: map[string]string{},
-			UID:         &uid,
+			Annotations:       map[string]string{},
+			UID:               &uid,
+			CreationTimestamp: creationTimestamp(inst),
 		},
 		Spec:         spec,
 		Status:       status,

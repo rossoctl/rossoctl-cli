@@ -90,17 +90,22 @@ func names(list ResourceList) []string {
 // The namespaces are deliberately not the server's (see testNamespaces): an
 // instance's namespace comes from its record, so fixtures that reused the
 // server's list could not tell the two apart.
+//
+// Only the first carries a CreationTimestamp. The others stand in for records
+// written before that field existed, so the absent case stays covered rather than
+// every fixture exercising the same branch.
 func mixedInstances() []instances.Instance {
 	return []instances.Instance{
 		{
-			ID:              "11111111-1111-4111-8111-111111111111",
-			Name:            "swift-falcon-0001",
-			Namespace:       "recorded1",
-			InboundProtocol: instances.ProtocolA2A,
-			InboundAddr:     "127.0.0.1:8080",
-			SessionAddr:     "127.0.0.1:54321",
-			CommandLine:     []string{"python", "agent.py"},
-			PID:             4242,
+			ID:                "11111111-1111-4111-8111-111111111111",
+			Name:              "swift-falcon-0001",
+			Namespace:         "recorded1",
+			InboundProtocol:   instances.ProtocolA2A,
+			InboundAddr:       "127.0.0.1:8080",
+			SessionAddr:       "127.0.0.1:54321",
+			CommandLine:       []string{"python", "agent.py"},
+			PID:               4242,
+			CreationTimestamp: "2024-05-06T07:08:09Z",
 		},
 		{
 			ID:              "22222222-2222-4222-8222-222222222222",
@@ -558,6 +563,131 @@ func TestAgentDetailReportsReadyCondition(t *testing.T) {
 	}
 	if c["type"] != "Ready" || c["status"] != "True" {
 		t.Errorf("condition = %v, want a Ready/True condition", c)
+	}
+}
+
+// TestAgentListCarriesTheCreationTimestamp verifies a listing entry reports the
+// record's creation time, and that a record without one reports null rather than
+// an empty string.
+//
+// mixedInstances gives only the first fixture a timestamp, so one call covers both
+// branches: swift-falcon-0001 has one and keen-ridge-0003 does not.
+func TestAgentListCarriesTheCreationTimestamp(t *testing.T) {
+	stubLister(t, mixedInstances(), nil)
+	ts := newTestServer(t, "/api/v1")
+
+	byName := map[string]ResourceSummary{}
+	for _, it := range getResourceList(t, ts, "/api/v1/agents").Items {
+		byName[it.Name] = it
+	}
+
+	stamped, ok := byName["swift-falcon-0001"]
+	if !ok {
+		t.Fatalf("swift-falcon-0001 missing from the listing: %v", byName)
+	}
+	if stamped.CreatedAt == nil {
+		t.Error("createdAt is null, want the record's timestamp")
+	} else if want := "2024-05-06T07:08:09Z"; *stamped.CreatedAt != want {
+		t.Errorf("createdAt = %q, want %q", *stamped.CreatedAt, want)
+	}
+
+	bare, ok := byName["keen-ridge-0003"]
+	if !ok {
+		t.Fatalf("keen-ridge-0003 missing from the listing: %v", byName)
+	}
+	if bare.CreatedAt != nil {
+		t.Errorf("createdAt = %q, want null for a record without one", *bare.CreatedAt)
+	}
+}
+
+// TestListAndDetailAgreeOnTheCreationTimestamp is the point of both endpoints
+// reading one field: a reader who lists and then describes an instance must not be
+// told two different things about when it started.
+//
+// The two schemas spell the field differently (createdAt and creationTimestamp), so
+// nothing but a test relates them.
+func TestListAndDetailAgreeOnTheCreationTimestamp(t *testing.T) {
+	insts := mixedInstances()
+	stubLister(t, insts, nil)
+	stubGetter(t, insts)
+	ts := newTestServer(t, "/api/v1")
+
+	for _, it := range getResourceList(t, ts, "/api/v1/agents").Items {
+		got := getDetail(t, ts, "/api/v1/agents/"+it.Namespace+"/"+it.Name)
+
+		switch {
+		case it.CreatedAt == nil && got.Metadata.CreationTimestamp == nil:
+			// Agreed: neither knows.
+		case it.CreatedAt == nil || got.Metadata.CreationTimestamp == nil:
+			t.Errorf("%s: listing has %v but detail has %v; one endpoint knows the start time and the other does not",
+				it.Name, derefOr(it.CreatedAt, "null"), derefOr(got.Metadata.CreationTimestamp, "null"))
+		case *it.CreatedAt != *got.Metadata.CreationTimestamp:
+			t.Errorf("%s: listing says %q but detail says %q",
+				it.Name, *it.CreatedAt, *got.Metadata.CreationTimestamp)
+		}
+	}
+}
+
+// derefOr renders a nullable wire string for an error message.
+func derefOr(s *string, fallback string) string {
+	if s == nil {
+		return fallback
+	}
+	return *s
+}
+
+// TestAgentDetailReportsReadyReplicas verifies the detail reports one ready
+// replica, which is what makes the CLI render "1/1 ready" rather than the "0/1" an
+// absent field produces. A hosted instance is a single process, and its record
+// existing is what makes it ready.
+func TestAgentDetailReportsReadyReplicas(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	got := getDetail(t, ts, "/api/v1/agents/recorded1/swift-falcon-0001")
+	if ready, _ := got.Status["readyReplicas"].(float64); int(ready) != 1 {
+		t.Errorf("status.readyReplicas = %v, want 1", got.Status["readyReplicas"])
+	}
+
+	// Only readyReplicas. availableReplicas is a Deployment's count of replicas past
+	// their minimum-ready deadline; setting it here would claim a rollout guarantee a
+	// local process does not provide.
+	if v, ok := got.Status["availableReplicas"]; ok {
+		t.Errorf("status.availableReplicas = %v, want it absent for a local process", v)
+	}
+}
+
+// TestAgentDetailCarriesTheCreationTimestamp verifies the record's creation time
+// reaches the metadata unchanged, so a reader sees when the instance was started.
+func TestAgentDetailCarriesTheCreationTimestamp(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	got := getDetail(t, ts, "/api/v1/agents/recorded1/swift-falcon-0001")
+	if got.Metadata.CreationTimestamp == nil {
+		t.Fatal("creationTimestamp is null, want the record's timestamp")
+	}
+	// Passed through verbatim rather than reformatted: the record already holds
+	// RFC 3339, which is what this field is.
+	if want := "2024-05-06T07:08:09Z"; *got.Metadata.CreationTimestamp != want {
+		t.Errorf("creationTimestamp = %q, want %q", *got.Metadata.CreationTimestamp, want)
+	}
+}
+
+// TestAgentDetailOmitsAnAbsentCreationTimestamp verifies a record written before
+// the field existed reports null rather than an empty string.
+//
+// Null is what the schema marks nullable for, and it reads as "unknown", which is
+// true. A pointer to "" would render as a blank Created line, which reads as a
+// broken server rather than an old record.
+func TestAgentDetailOmitsAnAbsentCreationTimestamp(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+
+	got := getDetail(t, ts, "/api/v1/agents/recorded2/keen-ridge-0003")
+	if got.Metadata.CreationTimestamp != nil {
+		t.Errorf("creationTimestamp = %q, want null for a record without one",
+			*got.Metadata.CreationTimestamp)
 	}
 }
 

@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Protocol is the application protocol an instance's inbound listener speaks.
@@ -138,6 +139,22 @@ type Instance struct {
 	// the instance, not the child. It lets a reader test whether a file is
 	// stale without opening a connection.
 	PID int `json:"pid"`
+
+	// CreationTimestamp is when the record was created, as an RFC 3339 string in
+	// UTC. Create fills it if empty.
+	//
+	// A string rather than a time.Time so the record says exactly what it means
+	// on disk and round-trips unchanged: time.Time would re-encode to whatever
+	// precision and offset the local clock produced, and a hand-edited or
+	// hand-written record could not be read back without a parse error. Nothing
+	// here does arithmetic on it — it is reported, not compared — so the parsed
+	// form would be converted straight back to a string anyway.
+	//
+	// UTC because these records are read by tooling and compared across hosts; a
+	// local offset would make two instances' timestamps incomparable without
+	// knowing where each was written. Empty on records written before this field
+	// existed, which readers must treat as "unknown" rather than as the zero time.
+	CreationTimestamp string `json:"creation_timestamp,omitempty"`
 }
 
 // DefaultNamespace is the namespace used when none is given. Instances are
@@ -284,6 +301,13 @@ func Create(inst Instance) (*Handle, error) {
 	}
 	if inst.PID == 0 {
 		inst.PID = os.Getpid()
+	}
+	// Filled here rather than at the struct literal so every caller records one,
+	// and left alone when already set so a caller reconstructing a record keeps
+	// the original time. Truncated to the second: the format carries no more, and
+	// rounding rather than truncating could report a time in the future.
+	if inst.CreationTimestamp == "" {
+		inst.CreationTimestamp = time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 	}
 
 	// 0o700: the record names ports serving an unauthenticated session API,

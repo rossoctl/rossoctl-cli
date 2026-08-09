@@ -14,6 +14,30 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/rossoctl/rossoctl-cli/internal/agentapi"
+)
+
+// The response types the backend and internal/serve both produce live in
+// internal/agentapi, so this package and that server cannot disagree about the
+// shapes they exchange. They are aliased rather than re-declared so existing
+// callers keep using apiclient.AgentDetail and friends, and so a value decoded
+// here is the same type the server encodes.
+//
+// Request types (CreateAgentRequest and the like) stay in this package: only the
+// server-to-client direction has a second implementation to keep honest.
+type (
+	AgentDetail    = agentapi.AgentDetail
+	ToolDetail     = agentapi.ToolDetail
+	AgentMetadata  = agentapi.AgentMetadata
+	ServiceInfo    = agentapi.ServiceInfo
+	ServicePort    = agentapi.ServicePort
+	AgentSummary   = agentapi.AgentSummary
+	ToolSummary    = agentapi.ToolSummary
+	ResourceLabels = agentapi.ResourceLabels
+	RouteStatus    = agentapi.RouteStatus
+	AgentCard      = agentapi.AgentCard
+	AgentCardSkill = agentapi.AgentCardSkill
 )
 
 // Client talks to a Rossoctl API server rooted at BaseURL.
@@ -266,25 +290,6 @@ func (c *Client) GetPlatformStatus(ctx context.Context) (*PlatformStatus, error)
 	return &status, nil
 }
 
-// ResourceLabels mirrors the backend's ResourceLabels model.
-type ResourceLabels struct {
-	Protocol  []string `json:"protocol"`
-	Framework *string  `json:"framework"`
-	Type      *string  `json:"type"`
-}
-
-// AgentSummary mirrors the backend's AgentSummary model (one entry in the
-// GET /agents response).
-type AgentSummary struct {
-	Name         string         `json:"name"`
-	Namespace    string         `json:"namespace"`
-	Description  string         `json:"description"`
-	Status       string         `json:"status"`
-	Labels       ResourceLabels `json:"labels"`
-	WorkloadType *string        `json:"workloadType"`
-	CreatedAt    *string        `json:"createdAt"`
-}
-
 // AgentListResponse mirrors the backend's AgentListResponse model.
 type AgentListResponse struct {
 	Items []AgentSummary `json:"items"`
@@ -305,43 +310,6 @@ func (c *Client) ListAgents(ctx context.Context, namespace string) (*AgentListRe
 	return &resp, nil
 }
 
-// AgentMetadata is the metadata block of an agent detail response.
-type AgentMetadata struct {
-	Name              string            `json:"name"`
-	Namespace         string            `json:"namespace"`
-	Labels            map[string]string `json:"labels"`
-	Annotations       map[string]string `json:"annotations"`
-	CreationTimestamp *string           `json:"creationTimestamp"`
-	UID               *string           `json:"uid"`
-}
-
-// ServicePort is one port of an agent's Service.
-type ServicePort struct {
-	Name       string `json:"name"`
-	Port       int    `json:"port"`
-	TargetPort any    `json:"targetPort"` // may be int or string
-}
-
-// ServiceInfo is the optional service block of an agent detail response.
-type ServiceInfo struct {
-	Name      string        `json:"name"`
-	Type      string        `json:"type"`
-	ClusterIP string        `json:"clusterIP"`
-	Ports     []ServicePort `json:"ports"`
-}
-
-// AgentDetail mirrors the backend's GET /agents/{namespace}/{name} response.
-// spec and status are workload-shaped and free-form, so they are kept as maps
-// and read opportunistically by the renderer.
-type AgentDetail struct {
-	Metadata     AgentMetadata  `json:"metadata"`
-	Spec         map[string]any `json:"spec"`
-	Status       map[string]any `json:"status"`
-	WorkloadType string         `json:"workloadType"`
-	ReadyStatus  string         `json:"readyStatus"`
-	Service      *ServiceInfo   `json:"service"`
-}
-
 // GetAgent fetches GET /agents/<namespace>/<name>.
 func (c *Client) GetAgent(ctx context.Context, namespace, name string) (*AgentDetail, error) {
 	path := "agents/" + url.PathEscape(namespace) + "/" + url.PathEscape(name)
@@ -353,17 +321,6 @@ func (c *Client) GetAgent(ctx context.Context, namespace, name string) (*AgentDe
 	return &detail, nil
 }
 
-// RouteStatus mirrors the backend's GET
-// /agents/{namespace}/{name}/route-status response, which reports whether an
-// HTTPRoute exposes the workload.
-//
-// The published OpenAPI document types the response as a free-form object, so
-// the field name comes from the server and the web UI, both of which use
-// hasRoute.
-type RouteStatus struct {
-	HasRoute bool `json:"hasRoute"`
-}
-
 // GetAgentRouteStatus fetches GET /agents/<namespace>/<name>/route-status.
 func (c *Client) GetAgentRouteStatus(ctx context.Context, namespace, name string) (*RouteStatus, error) {
 	path := "agents/" + url.PathEscape(namespace) + "/" + url.PathEscape(name) + "/route-status"
@@ -373,37 +330,6 @@ func (c *Client) GetAgentRouteStatus(ctx context.Context, namespace, name string
 		return nil, err
 	}
 	return &status, nil
-}
-
-// AgentCardSkill is one entry in an AgentCard's skills list.
-type AgentCardSkill struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	Examples    []string `json:"examples"`
-}
-
-// AgentCard mirrors the backend's AgentCardResponse (GET
-// /chat/{namespace}/{name}/agent-card): the A2A agent card as served by the
-// agent itself, fetched through the backend.
-//
-// These are exactly the fields the backend's response model declares. An A2A
-// card served by an agent carries more — protocolVersion, preferredTransport,
-// defaultInputModes and so on — but the backend reshapes the card into this
-// model before answering, so those never reach a client and are not decoded
-// here. Note that Streaming is flattened to the top level, where the A2A card
-// itself nests it under "capabilities".
-//
-// Only Name, Version and URL are required; Description and Skills are optional
-// and Streaming defaults to false.
-type AgentCard struct {
-	Name        string           `json:"name"`
-	Description string           `json:"description"`
-	Version     string           `json:"version"`
-	URL         string           `json:"url"`
-	Streaming   bool             `json:"streaming"`
-	Skills      []AgentCardSkill `json:"skills"`
 }
 
 // GetAgentCard fetches GET /chat/<namespace>/<name>/agent-card.
@@ -491,18 +417,6 @@ func (c *Client) CreateAgent(ctx context.Context, req *CreateAgentRequest) (*Cre
 	return &resp, nil
 }
 
-// ToolSummary mirrors the backend's ToolSummary model (one entry in the
-// GET /tools response). It has the same shape as AgentSummary.
-type ToolSummary struct {
-	Name         string         `json:"name"`
-	Namespace    string         `json:"namespace"`
-	Description  string         `json:"description"`
-	Status       string         `json:"status"`
-	Labels       ResourceLabels `json:"labels"`
-	WorkloadType *string        `json:"workloadType"`
-	CreatedAt    *string        `json:"createdAt"`
-}
-
 // ToolListResponse mirrors the backend's ToolListResponse model.
 type ToolListResponse struct {
 	Items []ToolSummary `json:"items"`
@@ -522,12 +436,6 @@ func (c *Client) ListTools(ctx context.Context, namespace string) (*ToolListResp
 	}
 	return &resp, nil
 }
-
-// ToolDetail mirrors the backend's GET /tools/{namespace}/{name} response. It
-// has the same shape as AgentDetail (metadata + free-form spec/status +
-// workloadType/readyStatus + optional service), so it is an alias to reuse the
-// same renderer helpers.
-type ToolDetail = AgentDetail
 
 // GetTool fetches GET /tools/<namespace>/<name>.
 func (c *Client) GetTool(ctx context.Context, namespace, name string) (*ToolDetail, error) {
