@@ -106,6 +106,11 @@ rossoctl login --token <token>                  # set the token on the current c
 rossoctl login                                  # or: OAuth device flow against the server's Keycloak
 rossoctl login --server http://host:8080/api/v1/ --token <token>   # target the context for that host (create if absent), make it current
 
+# Inspect the bearer token stored on the context (decoded locally; nothing is sent)
+rossoctl auth status                            # name/username/email, issuer, expiry, audiences, roles, scopes
+rossoctl auth status --json                     # the decoded claims as JSON
+rossoctl auth status --context prod             # inspect another context's token
+
 # Show the server's auth configuration (GET <server>/auth/config)
 rossoctl auth-config
 rossoctl auth-config --json

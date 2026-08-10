@@ -436,3 +436,35 @@ func TestKeycloakRegisterFlagDefaults(t *testing.T) {
 		}
 	}
 }
+
+// TestKeycloakRegisterSuggestsReLogin pins the pointer to `login`: a token minted
+// before this registration lacks the new audience scope, so an existing login
+// keeps failing the workload's JWT validation until it is replaced.
+func TestKeycloakRegisterSuggestsReLogin(t *testing.T) {
+	_, srv := newFakeRegistrar(t)
+
+	out, err := execute(t, "keycloak", "register",
+		"--keycloakURL", srv.URL, "--namespace", "ns1",
+		"--sa", "agent-sa", "--workload", "agent-a")
+	if err != nil {
+		t.Fatalf("register: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "rossoctl login") {
+		t.Errorf("a successful register should suggest re-running login:\n%s", out)
+	}
+}
+
+// TestKeycloakRegisterDoesNotSuggestReLoginOnFailure keeps the suggestion tied to
+// success: telling a user to log in again after nothing was registered would send
+// them after a token that changes nothing.
+func TestKeycloakRegisterDoesNotSuggestReLoginOnFailure(t *testing.T) {
+	isolateHome(t)
+
+	out, err := execute(t, "keycloak", "register", "--namespace", "ns1", "--sa", "agent-sa")
+	if err == nil {
+		t.Fatalf("register without --workload should fail:\n%s", out)
+	}
+	if strings.Contains(out, "rossoctl login") {
+		t.Errorf("a failed register must not suggest re-running login:\n%s", out)
+	}
+}

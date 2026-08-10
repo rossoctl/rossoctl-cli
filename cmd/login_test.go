@@ -349,3 +349,21 @@ func TestLoginNoServerUsesCurrentContext(t *testing.T) {
 		t.Errorf("non-current context a should be untouched, got token %q", a.BearerToken)
 	}
 }
+
+// TestLoginSuggestsAuthStatus pins the pointer to `auth status`: the token's
+// roles and audiences decide what now works, and login is when the user has them.
+func TestLoginSuggestsAuthStatus(t *testing.T) {
+	isolateHome(t)
+	if _, err := execute(t, "config", "create-context",
+		"--name", "dev", "--server", "http://dev/api/v1/"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	out, err := execute(t, "login", "--token", "sekret")
+	if err != nil {
+		t.Fatalf("login: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "rossoctl auth status") {
+		t.Errorf("login should suggest `rossoctl auth status`:\n%s", out)
+	}
+}

@@ -27,6 +27,7 @@ This project follows the standard Go CLI layout:
 │   ├── install.go              # `rossoctl install` (prints setup instructions)
 │   ├── status.go               # `rossoctl status` (session + platform status)
 │   ├── login.go                # `rossoctl login` (--token or OAuth device flow)
+│   ├── auth_status.go          # `rossoctl auth status` (decodes the stored token's claims)
 │   ├── agents.go               # `rossoctl agents ...` (`list` fetches GET /agents)
 │   ├── authconfig.go           # `rossoctl auth-config` (shows server auth config)
 │   ├── config.go               # `rossoctl config ...` (context management)
@@ -37,7 +38,8 @@ This project follows the standard Go CLI layout:
 │   ├── apiclient/              # HTTP client for the Rossoctl backend API
 │   ├── buildinfo/              # Version metadata formatting
 │   ├── config/                 # ~/.config/rossoctl/config.yaml context persistence
-│   └── deviceflow/             # OAuth 2.0 device authorization grant (Keycloak)
+│   ├── deviceflow/             # OAuth 2.0 device authorization grant (Keycloak)
+│   └── jwt/                    # Unverified JWT claim decoding (for inspection only)
 ├── Makefile
 └── go.mod
 ```
@@ -85,12 +87,32 @@ authorization grant (RFC 8628): it reads `keycloak_url`, `realm`, and
 `client_id` from `GET <server>/auth/config`, requests a device code from
 Keycloak, prints a verification URL and one-time code (and best-effort opens a
 browser), polls until you authorize, and saves the resulting bearer token on
-the target context.
+the target context. It finishes by pointing at `rossoctl auth status`, since the
+token's roles and audiences decide which operations will now succeed.
+
+### Inspecting the stored token
+
+`rossoctl auth status` decodes the bearer token on the effective context and
+prints its claims: name, preferred username, email, subject, issuer, expiration
+(with a leading `WARNING` line once it has passed), audiences,
+`realm_access.roles`, and scopes. `--json` prints the decoded claims instead.
+
+Nothing is sent to the server — the token is read from the config file and
+decoded locally, so it works against a server that is down or that is rejecting
+the token. The signature is deliberately **not** verified: this reports what the
+token asserts about itself, which is a diagnostic, never an authorization
+decision. Contrast the two neighbouring commands: `rossoctl status` is the
+server's view of the session, and `rossoctl auth-config` is the server's
+authentication settings.
+
+Only JWTs can be read this way. `rossoctl login --token` accepts any string, and
+an OAuth server may issue an opaque token; for one of those the command fails and
+names `rossoctl status` as the way to ask the server instead.
 
 The command tree mirrors the subcommands referenced in the Rossoctl docs
 (`agents`, `config`, `namespaces`, `tools`, `ui`,
 plus `auth-config` and the top-level `install`, `login`, `status`). The
-`config` context commands, `login`, `auth-config`, `install`, `status`,
+`config` context commands, `login`, `auth status`, `auth-config`, `install`, `status`,
 `agents list`, `agents get`, `agents delete`, `agents import from-image`,
 `tools list`, `tools get`, `tools delete`, `tools import from-image`,
 `namespaces list`, and `ui open` are implemented; other leaf commands currently

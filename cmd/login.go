@@ -109,6 +109,10 @@ until you authorize.`,
 		} else {
 			cmd.Printf("Logged in; token set on context %q.\n", target.Name)
 		}
+		// Named here because the token's roles and audiences are what decide
+		// which operations will now succeed, and this is the moment the user has
+		// them: `auth status` decodes the token just stored.
+		cmd.Println("Run `rossoctl auth status` to see the privileges this token carries.")
 		return nil
 	},
 }

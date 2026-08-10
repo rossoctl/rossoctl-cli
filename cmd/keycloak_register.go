@@ -158,6 +158,12 @@ func printRegisterResult(cmd *cobra.Command, res keycloakadmin.RegisterResult, s
 	for _, plat := range res.PlatformLinked {
 		cmd.Printf("Attached it to platform client %q.\n", plat)
 	}
+
+	// A token minted before this registration does not carry the new audience
+	// scope, so an existing login keeps failing the workload's JWT validation
+	// until it is replaced. Say so, since the registration itself looked like it
+	// succeeded and the next failure would otherwise be mystifying.
+	cmd.Println("\nRun `rossoctl login` again so your token picks up the new audience scope.")
 }
 
 func init() {
