@@ -7,14 +7,16 @@ import (
 	"github.com/rossoctl/rossoctl-cli/internal/config"
 )
 
-// TestNewClientIsAlwaysHTTP verifies every context type yields the HTTP client.
-// A cortex context is no exception: it is reached by pointing it at a
-// `rossoctl cortex serve` address, not by a separate file-backed client.
+// TestNewClientIsAlwaysHTTP verifies every context yields the HTTP client,
+// including one whose type is unset or holds a value this build no longer
+// defines — such as the "cortex" type a config file may still carry from an
+// older release. A cortex is reached by pointing a context at a `rossoctl cortex
+// serve` address, not by a separate file-backed client.
 func TestNewClientIsAlwaysHTTP(t *testing.T) {
 	for _, ctxType := range []config.Type{
 		config.TypeAPI,
-		config.TypeCortex,
-		"", // unset
+		"cortex", // retired from this build; still valid on disk
+		"",       // unset
 	} {
 		t.Run(string(ctxType), func(t *testing.T) {
 			c := NewClient(&config.Context{Type: ctxType, Server: "http://x/api/v1/"})
@@ -38,9 +40,9 @@ func TestNewClientCarriesContextFields(t *testing.T) {
 		t.Errorf("BearerToken = %q, want %q", c.BearerToken, ctx.BearerToken)
 	}
 
-	// A cortex context's server is honored the same way, so a context pointed at
-	// a local `cortex serve` reaches it rather than being routed elsewhere.
-	cortex := &config.Context{Type: config.TypeCortex, Name: "mycortex", Server: "http://localhost:9097/api/v1/"}
+	// A localhost server is honored the same way, so a context pointed at a local
+	// `cortex serve` reaches it rather than being routed elsewhere.
+	cortex := &config.Context{Type: config.TypeAPI, Name: "cortex", Server: "http://localhost:9097/api/v1/"}
 	cc, ok := NewClient(cortex).(*apiclient.Client)
 	if !ok {
 		t.Fatalf("expected *apiclient.Client for a cortex context, got %T", cc)

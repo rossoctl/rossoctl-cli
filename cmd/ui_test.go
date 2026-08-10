@@ -51,7 +51,7 @@ func TestUIOpenBlankServerFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cfg.Upsert(config.Context{Name: "empty", Type: config.TypeCortex})
+	cfg.Upsert(config.Context{Name: "empty", Type: config.TypeAPI})
 	if err := cfg.SetCurrent("empty"); err != nil {
 		t.Fatalf("set current: %v", err)
 	}

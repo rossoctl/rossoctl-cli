@@ -74,7 +74,7 @@ var _ Rossoctl = (*apiclient.Client)(nil)
 // NewClient builds a Rossoctl backend for ctx: an HTTP apiclient.Client for the
 // context's server and bearer token.
 //
-// Every context type reaches the API over HTTP, including TypeCortex. A cortex
+// Every context reaches the API over HTTP, a local cortex included. A cortex
 // context once had its own file-backed client reading agents.json directly; that
 // backend is gone, and a cortex is now reached the same way as any other server —
 // by pointing the context at a `rossoctl cortex serve` address.

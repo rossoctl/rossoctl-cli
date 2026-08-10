@@ -23,21 +23,24 @@ const (
 	filePerm os.FileMode = 0o600
 )
 
-// Type records what kind of server a Context targets: a hosted Rossoctl API
-// ("api") or a local Cortex ("cortex").
+// Type records what kind of server a Context targets. Every context is reached
+// the same way, over HTTP at its server URI, so the type does not select a
+// client implementation — it is a label describing what is at the other end.
 //
-// Both are reached the same way, over HTTP at the context's server URI, so the
-// type does not select a client implementation — it is a label describing what
-// is at the other end.
+// There was once a second value, "cortex", for a context served by `rossoctl
+// cortex serve`. Nothing ever set it: every context-creating path assigned
+// "api", so no condition keyed on it could fire. A local cortex is an ordinary
+// HTTP server reached by pointing a context at its address, which "api" already
+// describes.
+//
+// Type is not validated on load, so a config file written when "cortex" existed
+// still parses; the value is simply carried as-is.
 type Type string
 
 const (
-	// TypeAPI is a context served by the Rossoctl HTTP API (backed by a
-	// Kubernetes cluster).
+	// TypeAPI is a context served by the Rossoctl HTTP API — whether that is a
+	// backend fronting a Kubernetes cluster or a local `rossoctl cortex serve`.
 	TypeAPI Type = "api"
-	// TypeCortex is a context served by a local Cortex, as started by
-	// `rossoctl cortex serve`.
-	TypeCortex Type = "cortex"
 )
 
 // Context is a single named target: a type, a server URI, an optional default

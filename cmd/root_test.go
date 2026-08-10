@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
+	"github.com/rossoctl/rossoctl-cli/internal/config"
 )
 
 // TestMain isolates HOME to a throwaway directory for the whole cmd test
@@ -301,5 +303,141 @@ func TestErrorHintQuietForOtherErrors(t *testing.T) {
 				t.Errorf("errorHint = %q, want no hint", hint)
 			}
 		})
+	}
+}
+
+// refusedError produces the error chain a real dial failure yields, by asking
+// net/http for a port nothing is listening on and wrapping it the way
+// apiclient.doJSON does.
+//
+// It is built from a real connection rather than a hand-made syscall.Errno so the
+// test proves errorHint matches the chain the client actually produces. A
+// constructed errno would pass even if net/http stopped surfacing the syscall.
+func refusedError(t *testing.T) error {
+	t.Helper()
+
+	// Port 1 on loopback: privileged, so nothing is listening, and the connection
+	// is refused rather than timing out as a filtered address would.
+	_, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://127.0.0.1:1/api/v1/agents")
+	if err == nil {
+		t.Fatal("expected a dial failure against 127.0.0.1:1")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("test precondition: %v is not ECONNREFUSED", err)
+	}
+	return fmt.Errorf("requesting %s: %w", "http://127.0.0.1:1/api/v1/agents", err)
+}
+
+// seedContext writes a single named context and makes it current, bypassing
+// create-context so the name is exactly as given.
+func seedContext(t *testing.T, name, server string) {
+	t.Helper()
+	path := isolateHome(t)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Upsert(config.Context{Name: name, Type: config.TypeAPI, Server: server})
+	if err := cfg.SetCurrent(name); err != nil {
+		t.Fatalf("set current: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// TestErrorHintSuggestsCortexServeOnRefusedConnection is the case this hint
+// exists for: a context pointed at a local `cortex serve` that was never started.
+func TestErrorHintSuggestsCortexServeOnRefusedConnection(t *testing.T) {
+	resetFlags(rootCmd)
+	seedContext(t, "cortex", "http://localhost:9097/api/v1/")
+
+	hint := errorHint(refusedError(t))
+	if hint == "" {
+		t.Fatal("a refused connection on the cortex context should produce a hint")
+	}
+	if !strings.Contains(hint, "rossoctl cortex serve") {
+		t.Errorf("hint %q should name `rossoctl cortex serve`", hint)
+	}
+	// The server is named so the user can see which address was unreachable.
+	if !strings.Contains(hint, "http://localhost:9097/api/v1/") {
+		t.Errorf("hint %q should name the context's server", hint)
+	}
+}
+
+// TestErrorHintQuietForRefusedConnectionOnOtherContexts keeps the suggestion from
+// becoming misdirection. A production API that is down is not fixed by starting a
+// local server, so only the context that names one gets the advice.
+func TestErrorHintQuietForRefusedConnectionOnOtherContexts(t *testing.T) {
+	resetFlags(rootCmd)
+	seedContext(t, "prod", "http://rossoctl.example.com/api/v1/")
+
+	if hint := errorHint(refusedError(t)); hint != "" {
+		t.Errorf("errorHint on a non-cortex context = %q, want no hint", hint)
+	}
+}
+
+// TestErrorHintQuietForRefusedConnectionWithExplicitServer covers --server, which
+// overrides every context: the current context's name then says nothing about
+// what was actually dialed.
+func TestErrorHintQuietForRefusedConnectionWithExplicitServer(t *testing.T) {
+	resetFlags(rootCmd)
+	seedContext(t, "cortex", "http://localhost:9097/api/v1/")
+
+	server = "http://elsewhere.example.com/api/v1/"
+	t.Cleanup(func() { server = "" })
+
+	if hint := errorHint(refusedError(t)); hint != "" {
+		t.Errorf("errorHint with an explicit --server = %q, want no hint", hint)
+	}
+}
+
+// TestErrorHintDistinguishesRefusedFromOtherTransportFailures pins the choice of
+// errors.Is over message matching. An unresolvable host is not a refused
+// connection, and starting a local server would not fix it.
+func TestErrorHintDistinguishesRefusedFromOtherTransportFailures(t *testing.T) {
+	resetFlags(rootCmd)
+	seedContext(t, "cortex", "http://localhost:9097/api/v1/")
+
+	// .invalid is reserved by RFC 2606 and never resolves.
+	_, dnsErr := (&http.Client{Timeout: 5 * time.Second}).Get("http://nonexistent.invalid./x")
+	if dnsErr == nil {
+		t.Skip("this network resolves nonexistent.invalid.; cannot test a DNS failure")
+	}
+	wrapped := fmt.Errorf("requesting %s: %w", "http://nonexistent.invalid./x", dnsErr)
+
+	if hint := errorHint(wrapped); hint != "" {
+		t.Errorf("errorHint on a DNS failure = %q, want no hint", hint)
+	}
+}
+
+// TestErrorHintRefusedSurvivesWrapping verifies the hint survives the extra
+// context commands add on the way up, as the 401 hint does.
+func TestErrorHintRefusedSurvivesWrapping(t *testing.T) {
+	resetFlags(rootCmd)
+	seedContext(t, "cortex", "http://localhost:9097/api/v1/")
+
+	wrapped := fmt.Errorf("listing agents in namespace %q: %w", "team1", refusedError(t))
+	if hint := errorHint(wrapped); hint == "" {
+		t.Error("a wrapped refused connection should still produce a hint")
+	}
+}
+
+// TestErrorHintQuietWhenConfigIsUnreadable covers the defensive context lookup:
+// errorHint runs while an error is already being reported, so a broken config
+// must leave the hint silent rather than obscure the real failure.
+func TestErrorHintQuietWhenConfigIsUnreadable(t *testing.T) {
+	resetFlags(rootCmd)
+	path := isolateHome(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{{ not yaml"), 0o600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+
+	// Must not panic, and must not produce a hint.
+	if hint := errorHint(refusedError(t)); hint != "" {
+		t.Errorf("errorHint with an unreadable config = %q, want no hint", hint)
 	}
 }

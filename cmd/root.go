@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -29,6 +30,15 @@ var (
 
 // defaultServer is the API endpoint used when --server is not supplied.
 const defaultServer = "http://rossoctl-ui.localtest.me:8080/api/v1/"
+
+// cortexContextName is the context name that marks a context as pointing at a
+// local `rossoctl cortex serve`, which is the one server rossoctl can start
+// itself. It is the trigger for the hint in connectionRefusedHint.
+//
+// A name is the marker because nothing else distinguishes such a context: a
+// cortex is reached over HTTP like any other server, and the config's type field
+// is "api" for every context every command creates.
+const cortexContextName = "cortex"
 
 // Persistent flags shared by every command.
 var (
@@ -210,21 +220,64 @@ func Execute() {
 // each call site: a 401 can come from any command that reaches the API, and
 // eleven files call one of these clients. Adding it here covers agents, tools,
 // status, envvars, and anything added later for free.
+// Two shapes of failure carry a remedy: a response the server sent (a
+// StatusError) and never reaching the server at all (a refused connection).
 func errorHint(err error) string {
 	var statusErr *apiclient.StatusError
-	if !errors.As(err, &statusErr) {
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case http.StatusUnauthorized:
+			// Deliberately not suggested for 403: that is an authenticated
+			// identity lacking permission, where signing in again changes
+			// nothing and the advice would send the user in a circle.
+			return "Hint: the server rejected the credentials. Run `rossoctl login` to sign in."
+		default:
+			return ""
+		}
+	}
+
+	if hint := connectionRefusedHint(err); hint != "" {
+		return hint
+	}
+	return ""
+}
+
+// connectionRefusedHint suggests starting the local API when the context that
+// could not be reached is the one that names it.
+//
+// The test is the syscall, via errors.Is, not the words "connection refused" in
+// the message. apiclient wraps the dial failure with %w, so the errno survives
+// in the chain, and matching on it distinguishes a refused connection from a
+// timeout or an unresolvable host — neither of which a local server would fix.
+// It also leaves an unrelated error that merely says "connection refused" alone.
+//
+// The suggestion is offered only for a context named "cortex". `cortex serve` is
+// the one server rossoctl can start itself, so it is a real remedy there and
+// misdirection anywhere else: a production API that is down is not fixed by
+// running a local server, and saying so would send the user after the wrong
+// problem. Naming the context is a convention rather than a guarantee, which is
+// why this is a hint appended to the real error rather than a replacement for it.
+func connectionRefusedHint(err error) string {
+	if !errors.Is(err, syscall.ECONNREFUSED) {
 		return ""
 	}
 
-	switch statusErr.StatusCode {
-	case http.StatusUnauthorized:
-		// Deliberately not suggested for 403: that is an authenticated
-		// identity lacking permission, where signing in again changes
-		// nothing and the advice would send the user in a circle.
-		return "Hint: the server rejected the credentials. Run `rossoctl login` to sign in."
-	default:
+	// An explicit --server overrides every context (see resolveServer), so the
+	// current context's name says nothing about what was actually dialed.
+	if server != "" {
 		return ""
 	}
+
+	// Read the context defensively. This runs while an error is already being
+	// reported, so a config that cannot be loaded must leave the hint silent
+	// rather than replace the failure the user is trying to read.
+	ctx, ctxErr := resolveContext()
+	if ctxErr != nil || ctx == nil || ctx.Name != cortexContextName {
+		return ""
+	}
+
+	return "Hint: nothing is listening at " + ctx.Server +
+		". Run `rossoctl cortex serve` to start the local API."
 }
 
 func init() {
