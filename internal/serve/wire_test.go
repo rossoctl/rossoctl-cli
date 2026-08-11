@@ -216,6 +216,53 @@ func TestAgentCardWireShapeMatchesClientType(t *testing.T) {
 	}
 }
 
+// TestIdentityConfigWireShapeMatchesClientType verifies what this server forwards
+// from an admin endpoint fits the client type the CLI decodes it into.
+//
+// Deliberately a plain Decode, unlike its siblings above: DisallowUnknownFields is
+// inert against apiclient.AgentIdentityConfig, whose custom UnmarshalJSON consumes
+// the document itself and so never consults the decoder's setting. Adding the call
+// would suggest a guarantee that is not there. What matters instead is the
+// opposite of what strict decoding checks — that blocks the client does not model
+// are retained rather than rejected, since this endpoint forwards a document whose
+// unmodeled parts are most of it.
+func TestIdentityConfigWireShapeMatchesClientType(t *testing.T) {
+	stubGetter(t, adminInstances())
+	stubConfigFetcher(t, authbridgeConfig, http.StatusOK, nil)
+	ts := newTestServer(t, "/api/v1")
+
+	res, err := http.Get(ts.URL + configPath)
+	if err != nil {
+		t.Fatalf("GET identity-config: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	var got apiclient.AgentIdentityConfig
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatalf("server output does not fit the client's AgentIdentityConfig: %v", err)
+	}
+
+	if got.Mode != "proxy-sidecar" {
+		t.Errorf("Mode = %q, want proxy-sidecar", got.Mode)
+	}
+	if len(got.Pipeline.Inbound.Plugins) != 2 {
+		t.Fatalf("inbound plugins = %+v, want two", got.Pipeline.Inbound.Plugins)
+	}
+	if got.Pipeline.Inbound.Plugins[0].Name != "jwt-validation" {
+		t.Errorf("plugin names did not survive: %+v", got.Pipeline.Inbound.Plugins)
+	}
+	if len(got.Pipeline.Outbound.Plugins) != 1 {
+		t.Errorf("outbound plugins = %+v, want one", got.Pipeline.Outbound.Plugins)
+	}
+	// The blocks the client keeps uninterpreted. Losing these would leave the CLI's
+	// --json output a view of the client's model rather than of the configuration.
+	for _, key := range []string{"listener", "session", "stats"} {
+		if _, ok := got.Rest[key]; !ok {
+			t.Errorf("the %q block did not survive into Rest: %+v", key, got.Rest)
+		}
+	}
+}
+
 // TestLocalInstanceEmitsNullService pins the wire form of the field whose Go type
 // changed in the agentapi merge. A nil *ServiceInfo and a nil any both encode as
 // null, so the output is unchanged — but that is a property of encoding/json, not

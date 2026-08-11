@@ -3,7 +3,7 @@
 // The API surface mirrors the OpenAPI document the real backend publishes at
 // /api/openapi.json: every operation in that document is routed here, so a UI
 // pointed at this server sees the same set of endpoints rather than a wall of
-// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Nine are real:
+// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Ten are real:
 //
 //   - GET /auth/config reports authentication as disabled, so a UI can finish
 //     initializing without a Keycloak realm behind it.
@@ -15,6 +15,8 @@
 //   - GET /agents/{namespace}/{name}/route-status reports that an existing
 //     instance has a route, since one reached at its inbound address always
 //     does; it 404s exactly when the detail endpoint does.
+//   - GET /agents/{namespace}/{name}/identity-config fetches the AuthBridge
+//     configuration from the instance's own admin endpoint.
 //   - GET /chat/{namespace}/{name}/agent-card fetches the agent card from the
 //     instance itself.
 //   - GET /health and GET /ready report the process is up and serving. Both are
@@ -117,7 +119,7 @@ var apiRoutes = []Route{
 	{http.MethodDelete, "/agents/{namespace}/{name}", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}", agentDetailRoute},
 	{http.MethodPost, "/agents/{namespace}/{name}/finalize-shipwright-build", unimplemented},
-	{http.MethodGet, "/agents/{namespace}/{name}/identity-config", unimplemented},
+	{http.MethodGet, "/agents/{namespace}/{name}/identity-config", agentIdentityConfigRoute},
 	{http.MethodGet, "/agents/{namespace}/{name}/identity-status", unimplemented},
 	{http.MethodPost, "/agents/{namespace}/{name}/migrate", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/route-status", agentRouteStatusRoute},
