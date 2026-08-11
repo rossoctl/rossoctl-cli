@@ -139,6 +139,11 @@ rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:lat
 rossoctl agents import --deployment-type sandbox from-image \
     --name orders --containerImage ghcr.io/x/y:latest --imagePullSecret regcred \
     --envVarsURL https://example.com/orders.env   # newline-separated key=value
+# --envVar sets one variable inline and may be repeated. Values are taken
+# literally, commas and all. Where both name the same variable, --envVar wins
+# over --envVarsURL, whichever order the flags appear in.
+rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:latest \
+    --envVar LOG_LEVEL=debug --envVar 'TAGS=a,b,c'
 
 # `agents --namespace` overrides the context's namespace for any agents subcommand
 rossoctl agents --namespace team2 get orders    # -> GET /agents/team2/orders
@@ -160,6 +165,9 @@ rossoctl tools delete weather-mcp                # DELETE /tools/<namespace>/wea
 rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest  # POST /tools
 rossoctl tools import --deployment-type statefulset from-image \
     --name weather-mcp --containerImage ghcr.io/x/y:latest --envVarsURL https://example.com/tool.env
+# --envVar works as it does for agents: repeatable, literal values, and it wins over --envVarsURL
+rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest \
+    --envVar LOG_LEVEL=debug --envVar 'TAGS=a,b,c'
 # --ports sets service ports as name:port:targetPort[:protocol] (default http:9090:9090:TCP); a bare "port" = http:port:port:TCP
 rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest --ports grpc:9000:9001:TCP,8080
 

@@ -118,6 +118,22 @@ var flagSliceDefaults = map[*pflag.Flag][]string{}
 // the first call, and neither Set("[]") nor Set(DefValue) round-trips. Every
 // flag's Changed bit is then cleared.
 //
+// One hazard this does not fully undo. Whether a slice or array flag's Set
+// replaces or appends is gated on a bit private to the pflag value, distinct
+// from the Flag.Changed set below, and Replace restores the contents without
+// clearing it. So the first --flag in a later test appends to the restored
+// default rather than replacing it. Reaching that bit means re-registering the
+// flag, which this helper cannot do.
+//
+// This is survivable only because every such flag either has a nil default
+// (--envVar: appending to nil is indistinguishable from replacing) or is only
+// ever set to a full replacement in tests (--ports). Give one a non-nil
+// default, or drop the Replace above, and values accumulate across Execute
+// calls. Either way several --envVar tests fail, because they assert exact
+// request-body contents rather than just presence;
+// TestAgentsImportEnvVarIsRepeatableAcrossRuns is the one that exists for this
+// reason alone.
+//
 // A flag set also remembers where a "--" delimiter appeared, which
 // ArgsLenAtDash reports and `authbridge exec` relies on. That position is private
 // state whose only reset is FlagSet.Init, so Init is re-invoked with the set's
