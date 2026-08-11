@@ -46,6 +46,10 @@ type Rossoctl interface {
 	// the running agent.
 	GetAgentCard(ctx context.Context, namespace, name string) (*apiclient.AgentCard, error)
 
+	// GetAgentIdentityConfig fetches the agent's AuthBridge configuration: its
+	// mode and the inbound/outbound plugin pipeline.
+	GetAgentIdentityConfig(ctx context.Context, namespace, name string) (*apiclient.AgentIdentityConfig, error)
+
 	// DeleteAgent deletes an agent by namespace and name.
 	DeleteAgent(ctx context.Context, namespace, name string) (*apiclient.DeleteResponse, error)
 

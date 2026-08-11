@@ -6,14 +6,18 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	authlibconfig "github.com/rossoctl/cortex/authbridge/authlib/config"
 
 	"github.com/rossoctl/rossoctl-cli/internal/agentapi"
 )
@@ -344,6 +348,141 @@ func (c *Client) GetAgentCard(ctx context.Context, namespace, name string) (*Age
 		return nil, err
 	}
 	return &card, nil
+}
+
+// PluginEntry is one plugin in a pipeline stage, decoded permissively.
+//
+// The embedded authlib type is what keeps this honest: the field tags for name,
+// id, on_error and config stay defined in the package AuthBridge itself loads,
+// so the CLI's idea of a plugin entry cannot drift from the one that runs. Note
+// its config field is a json.RawMessage the plugin framework never interprets —
+// each plugin owns that schema — so plugin config survives a decode/encode round
+// trip byte-for-byte, which is what keeps --json faithful for config keys this
+// build has never heard of.
+//
+// It exists because authlib's own PluginEntry implements UnmarshalYAML but not
+// UnmarshalJSON, so its two accepted spellings are not symmetric across formats.
+// In YAML a plugin may be written as a bare name ("jwt-validation") or as a full
+// object; loading YAML normalizes the bare form to the object form, so a server
+// that marshals a loaded Config always emits objects and authlib's type decodes
+// it. A server that instead builds this JSON itself may emit the bare string,
+// and that fails to decode at all — taking --json down with it, which is exactly
+// the case where seeing the raw response matters most.
+//
+// So this type accepts both spellings and normalizes to the object form.
+type PluginEntry struct {
+	authlibconfig.PluginEntry
+}
+
+// UnmarshalJSON accepts either a bare plugin name or a full plugin object.
+func (p *PluginEntry) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+
+	// The bare-name form. Decoded into Name with no config, matching what
+	// authlib's UnmarshalYAML does with the same shorthand.
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var name string
+		if err := json.Unmarshal(trimmed, &name); err != nil {
+			return err
+		}
+		p.PluginEntry = authlibconfig.PluginEntry{Name: name}
+		return nil
+	}
+
+	// The object form. Decoded into the embedded authlib type so its field
+	// tags stay the single definition of this shape; the alias sheds the
+	// method set to avoid recursing back into this function.
+	type plain authlibconfig.PluginEntry
+	var entry plain
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return err
+	}
+	p.PluginEntry = authlibconfig.PluginEntry(entry)
+	return nil
+}
+
+// MarshalJSON emits the object form, so --json prints a consistent shape
+// regardless of which spelling the server used.
+func (p PluginEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.PluginEntry)
+}
+
+// PipelineStage lists one stage's plugins in execution order.
+type PipelineStage struct {
+	Plugins []PluginEntry `json:"plugins"`
+}
+
+// Pipeline holds the inbound and outbound plugin stages.
+type Pipeline struct {
+	Inbound  PipelineStage `json:"inbound"`
+	Outbound PipelineStage `json:"outbound"`
+}
+
+// AgentIdentityConfig is the decoded identity-config response.
+//
+// The mode and pipeline are named explicitly because they are what this command
+// reports; everything else authlib's Config carries (listener, session, mTLS,
+// SPIFFE, ...) is preserved in Rest so --json stays faithful to a response
+// carrying fields this build does not know about.
+type AgentIdentityConfig struct {
+	Mode     string   `json:"mode"`
+	Pipeline Pipeline `json:"pipeline"`
+
+	// Rest holds every other top-level key, so nothing is silently dropped.
+	Rest map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the named fields and retains all others in Rest.
+func (c *AgentIdentityConfig) UnmarshalJSON(data []byte) error {
+	type plain AgentIdentityConfig
+	var known plain
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	*c = AgentIdentityConfig(known)
+
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return err
+	}
+	delete(all, "mode")
+	delete(all, "pipeline")
+	if len(all) > 0 {
+		c.Rest = all
+	}
+	return nil
+}
+
+// MarshalJSON re-emits the named fields together with everything held in Rest.
+func (c AgentIdentityConfig) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(c.Rest)+2)
+	maps.Copy(out, c.Rest)
+
+	mode, err := json.Marshal(c.Mode)
+	if err != nil {
+		return nil, err
+	}
+	out["mode"] = mode
+
+	pipeline, err := json.Marshal(c.Pipeline)
+	if err != nil {
+		return nil, err
+	}
+	out["pipeline"] = pipeline
+
+	return json.Marshal(out)
+}
+
+// GetAgentIdentityConfig fetches GET /agents/<namespace>/<name>/identity-config:
+// the AuthBridge mode and plugin pipeline configured for the agent.
+func (c *Client) GetAgentIdentityConfig(ctx context.Context, namespace, name string) (*AgentIdentityConfig, error) {
+	path := "agents/" + url.PathEscape(namespace) + "/" + url.PathEscape(name) + "/identity-config"
+
+	var cfg AgentIdentityConfig
+	if err := c.getJSON(ctx, path, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 // DeleteResponse mirrors the backend's DeleteResponse model.
