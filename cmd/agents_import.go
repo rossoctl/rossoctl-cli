@@ -48,6 +48,7 @@ func newAgentsImportFromImageCmd() *cobra.Command {
 	var (
 		name            string
 		envVarsURL      string
+		envVarFlags     []string
 		containerImage  string
 		imagePullSecret string
 	)
@@ -58,8 +59,11 @@ func newAgentsImportFromImageCmd() *cobra.Command {
 		Long: `Import an agent from an existing container image (POST <server>/agents).
 
 The agent is created in the namespace from the agents --namespace flag, or the
-current context's namespace. --deployment-type selects the workload type. Env
-vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
+current context's namespace. --deployment-type selects the workload type.
+
+Env vars come from --envVarsURL (a document of newline-separated key=value
+pairs) and from --envVar key=value, which may be repeated. When both name the
+same variable, --envVar wins, whatever order the flags appear in.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if name == "" {
@@ -74,10 +78,17 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 				return err
 			}
 
-			envVars, err := fetchEnvVars(cmd.Context(), cmd, envVarsURL)
+			docEnvVars, err := fetchEnvVars(cmd.Context(), cmd, envVarsURL)
 			if err != nil {
 				return err
 			}
+			flagEnvVars, err := parseEnvVarFlags(envVarFlags)
+			if err != nil {
+				return err
+			}
+			// Document first, flags second: an explicit --envVar wins over the
+			// fetched document for the same name.
+			envVars := mergeEnvVars(docEnvVars, flagEnvVars)
 
 			client, err := newClient(cmd)
 			if err != nil {
@@ -105,6 +116,21 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "", "name of the agent (required)")
 	f.StringVar(&envVarsURL, "envVarsURL", "", "URL to fetch environment variables from (newline-separated key=value)")
+	// StringArrayVar, not the StringSliceVar used elsewhere in this package: a
+	// StringSlice splits each value as CSV, which mangles legitimate env values
+	// and rejects others outright. "--envVar TAGS=a,b,c" would arrive as TAGS=a
+	// plus two bare "b" and "c" entries, which then fail key=value parsing with an
+	// error naming text the user never typed, and '--envVar {"a":1}' would fail in
+	// the flag layer with `bare " in non-quoted-field`. A StringArray keeps every
+	// value literal, so only repeating the flag adds an entry.
+	//
+	// The default must stay nil. resetFlags in root_test.go restores slice
+	// defaults through pflag's Replace, which does not clear pflag's private
+	// "changed" bit, so the first Set in a later test appends instead of
+	// replacing; appending to a nil default is still correct, while a non-nil one
+	// would leak between tests.
+	f.StringArrayVar(&envVarFlags, "envVar", nil,
+		"environment variable as key=value (repeatable; wins over --envVarsURL for the same name)")
 	f.StringVar(&containerImage, "containerImage", "", "container image to deploy (required)")
 	f.StringVar(&imagePullSecret, "imagePullSecret", "", "name of the image pull secret")
 
@@ -113,11 +139,12 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 
 func newAgentsImportFromSourceCmd() *cobra.Command {
 	var (
-		name       string
-		envVarsURL string
-		gitURL     string
-		gitPath    string
-		gitBranch  string
+		name        string
+		envVarsURL  string
+		envVarFlags []string
+		gitURL      string
+		gitPath     string
+		gitBranch   string
 	)
 
 	cmd := &cobra.Command{
@@ -132,6 +159,10 @@ func newAgentsImportFromSourceCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "", "name of the agent")
 	f.StringVar(&envVarsURL, "envVarsURL", "", "URL to fetch environment variables from")
+	// Declared for parity with --envVarsURL above and unread for the same reason:
+	// this subcommand is a stub, so whoever implements it finds both flags in
+	// place rather than a half-built surface.
+	f.StringArrayVar(&envVarFlags, "envVar", nil, "environment variable as key=value (repeatable)")
 	f.StringVar(&gitURL, "gitUrl", "", "git repository URL to build from")
 	f.StringVar(&gitPath, "gitPath", "", "path within the git repository")
 	f.StringVar(&gitBranch, "gitBranch", "main", "git branch to build from")
