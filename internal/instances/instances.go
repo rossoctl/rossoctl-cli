@@ -12,7 +12,7 @@
 // separate tool — or a person with `cat` — can read a file to learn where to
 // reach an instance and what command it is hosting.
 //
-// Records are grouped by namespace: ~/.config/rossocortex/namespaces/<ns>/.
+// Records are grouped by namespace: ~/.config/rossoctl/namespaces/<ns>/.
 // The namespace is a directory rather than a field inside the file so the set
 // of namespaces can be listed without opening every record, and so one
 // namespace's instances can be scanned without reading the others'.
@@ -163,13 +163,12 @@ type Instance struct {
 const DefaultNamespace = "team1"
 
 // BaseDir returns the directory holding the per-namespace instance
-// directories, ~/.config/rossocortex/namespaces.
+// directories, ~/.config/rossoctl/namespaces.
 //
 // The base directory honors $XDG_CONFIG_HOME (defaulting to ~/.config) so it
-// follows the XDG Base Directory spec, matching how the rossoctl config file
-// itself is located. Note the "rossocortex" component: instance files describe
-// cortex instances rather than rossoctl's own state, so they sit beside the
-// rossoctl directory rather than inside it.
+// follows the XDG Base Directory spec, and sits under the same "rossoctl"
+// directory as config.yaml: everything rossoctl writes lives in one place, so a
+// user backing up or clearing its state has a single directory to handle.
 func BaseDir() (string, error) {
 	xdg := os.Getenv("XDG_CONFIG_HOME")
 	if xdg == "" {
@@ -179,7 +178,7 @@ func BaseDir() (string, error) {
 		}
 		xdg = filepath.Join(home, ".config")
 	}
-	return filepath.Join(xdg, "rossocortex", "namespaces"), nil
+	return filepath.Join(xdg, "rossoctl", "namespaces"), nil
 }
 
 // Dir returns the directory holding namespace's instance records.
@@ -199,6 +198,29 @@ func Dir(namespace string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, namespace), nil
+}
+
+// CreateNamespace creates namespace's directory, and reports the path.
+//
+// Create makes a namespace's directory on demand, so this exists for the other
+// case: declaring a namespace that has no instances yet. An empty directory is
+// what makes a namespace visible to Namespaces, and so to GET /namespaces, which
+// lets a namespace be offered as a place to start something before anything runs
+// there.
+//
+// It is idempotent — an existing directory is success, not a conflict — because
+// callers use it to assert a namespace exists rather than to claim it.
+func CreateNamespace(namespace string) (string, error) {
+	dir, err := Dir(namespace)
+	if err != nil {
+		return "", err
+	}
+	// 0o700 for the same reason Create uses it: what lands in here names ports
+	// serving an unauthenticated session API.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating namespace directory %s: %w", dir, err)
+	}
+	return dir, nil
 }
 
 // maxNameLen bounds a name so it cannot exceed what a filesystem accepts as a

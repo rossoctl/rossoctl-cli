@@ -20,12 +20,12 @@ func isolateHome(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	return filepath.Join(dir, ".config", "rossocortex", "namespaces", DefaultNamespace)
+	return filepath.Join(dir, ".config", "rossoctl", "namespaces", DefaultNamespace)
 }
 
-// TestDirIsUnderRossocortex verifies the documented location, which is the one
+// TestDirIsUnderRossoctlConfig verifies the documented location, which is the one
 // thing an external reader of the directory depends on.
-func TestDirIsUnderRossocortex(t *testing.T) {
+func TestDirIsUnderRossoctlConfig(t *testing.T) {
 	want := isolateHome(t)
 
 	got, err := Dir(DefaultNamespace)
@@ -99,8 +99,109 @@ func TestDirHonorsXDGConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dir: %v", err)
 	}
-	if want := filepath.Join(xdg, "rossocortex", "namespaces", "team9"); got != want {
+	if want := filepath.Join(xdg, "rossoctl", "namespaces", "team9"); got != want {
 		t.Errorf("Dir() = %q, want %q", got, want)
+	}
+}
+
+// TestCreateNamespaceMakesAnEmptyNamespaceVisible verifies the point of the
+// helper: a namespace with no instances is listed once its directory exists, so it
+// can be offered as a place to start something.
+func TestCreateNamespaceMakesAnEmptyNamespaceVisible(t *testing.T) {
+	isolateHome(t)
+
+	before, err := Namespaces()
+	if err != nil {
+		t.Fatalf("Namespaces: %v", err)
+	}
+	if len(before) != 0 {
+		t.Fatalf("namespaces = %v, want none before creating any", before)
+	}
+
+	dir, err := CreateNamespace("team2")
+	if err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dir, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("%s is not a directory", dir)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("permissions = %o, want 700", perm)
+	}
+
+	got, err := Namespaces()
+	if err != nil {
+		t.Fatalf("Namespaces: %v", err)
+	}
+	if len(got) != 1 || got[0] != "team2" {
+		t.Errorf("namespaces = %v, want [team2]", got)
+	}
+
+	// The directory holds no instances, so the listings stay empty rather than
+	// inventing one.
+	insts, err := ListNamespace("team2")
+	if err != nil {
+		t.Fatalf("ListNamespace: %v", err)
+	}
+	if len(insts) != 0 {
+		t.Errorf("instances = %v, want none", insts)
+	}
+}
+
+// TestCreateNamespaceIsIdempotent verifies a second call is success rather than a
+// conflict, since callers use it to assert a namespace exists.
+func TestCreateNamespaceIsIdempotent(t *testing.T) {
+	isolateHome(t)
+
+	first, err := CreateNamespace("team1")
+	if err != nil {
+		t.Fatalf("first CreateNamespace: %v", err)
+	}
+	second, err := CreateNamespace("team1")
+	if err != nil {
+		t.Fatalf("second CreateNamespace: %v", err)
+	}
+	if first != second {
+		t.Errorf("paths differ: %q then %q", first, second)
+	}
+}
+
+// TestCreateNamespacePreservesExistingRecords verifies re-creating a namespace
+// that already holds instances leaves them alone.
+func TestCreateNamespacePreservesExistingRecords(t *testing.T) {
+	isolateHome(t)
+
+	if _, err := Create(Instance{Name: "bot", Namespace: "team1"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := CreateNamespace("team1"); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+
+	insts, err := ListNamespace("team1")
+	if err != nil {
+		t.Fatalf("ListNamespace: %v", err)
+	}
+	if len(insts) != 1 || insts[0].Name != "bot" {
+		t.Errorf("instances = %v, want the existing bot record", insts)
+	}
+}
+
+// TestCreateNamespaceRejectsBadNames verifies the validation Dir performs is not
+// bypassed, so a name that would escape the base directory is refused.
+func TestCreateNamespaceRejectsBadNames(t *testing.T) {
+	isolateHome(t)
+
+	for _, ns := range []string{"..", "a/b", ".hidden"} {
+		t.Run(ns, func(t *testing.T) {
+			if dir, err := CreateNamespace(ns); err == nil {
+				t.Errorf("CreateNamespace(%q) = %q, want an error", ns, dir)
+			}
+		})
 	}
 }
 

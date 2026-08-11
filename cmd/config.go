@@ -9,6 +9,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rossoctl/rossoctl-cli/internal/config"
+	"github.com/rossoctl/rossoctl-cli/internal/instances"
+	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
+	"github.com/rossoctl/rossoctl-cli/internal/serve"
 )
 
 // loadConfig returns the context config, creating and seeding it from the
@@ -164,7 +167,14 @@ var configCreateContextCmd = &cobra.Command{
 
 --server sets the context's server URI; if omitted, the global --server value
 is used, falling back to the built-in default. --namespace and --bearer-token
-are optional.`,
+are optional.
+
+A context named "cortex" is answered by handlers inside the command's own
+process rather than over the network, so creating one also creates the ` +
+		defaultServeNamespaces + ` namespace directories under
+~/.config/rossoctl/namespaces. That gives the new context somewhere to start
+agents and tools, and makes those namespaces visible to "namespaces list"
+before anything is running in them.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if createContextName == "" {
@@ -195,8 +205,36 @@ are optional.`,
 			return err
 		}
 		cmd.Printf("Created context %q and set it as current.\n", createContextName)
+
+		if createContextName == rossoctlclient.CortexContextName {
+			if err := seedCortexNamespaces(cmd); err != nil {
+				return err
+			}
+		}
 		return nil
 	},
+}
+
+// seedCortexNamespaces creates the default namespace directories for a newly
+// created cortex context, and names them on stdout.
+//
+// It runs after the config is saved, so a failure here leaves a usable context
+// rather than discarding one that was already reported as created. The namespaces
+// are the same list `cortex serve` advertises by default, taken from that flag's
+// default so the two cannot drift.
+//
+// A failure is reported rather than ignored: the directories are what make the
+// namespaces selectable, and silently skipping them would leave a context whose
+// namespace does not exist.
+func seedCortexNamespaces(cmd *cobra.Command) error {
+	for _, ns := range serve.SplitNamespaces(defaultServeNamespaces) {
+		dir, err := instances.CreateNamespace(ns)
+		if err != nil {
+			return fmt.Errorf("creating namespace %q for the cortex context: %w", ns, err)
+		}
+		cmd.Printf("Created namespace %q (%s).\n", ns, dir)
+	}
+	return nil
 }
 
 // --- set-context ---

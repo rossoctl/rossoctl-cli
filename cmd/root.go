@@ -17,6 +17,7 @@ import (
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
+	"github.com/rossoctl/rossoctl-cli/internal/inprocess"
 	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
 )
 
@@ -152,7 +153,10 @@ func newClient(cmd *cobra.Command) (rossoctlclient.Rossoctl, error) {
 		ctx = c
 	}
 
-	client := rossoctlclient.NewClient(ctx)
+	client, err := rossoctlclient.NewClient(ctx)
+	if err != nil {
+		return nil, err
+	}
 	attachVerboseLogger(cmd, client)
 	return client, nil
 }
@@ -173,6 +177,20 @@ func attachVerboseLogger(cmd *cobra.Command, client rossoctlclient.Rossoctl) {
 		return
 	}
 	errOut := cmd.ErrOrStderr()
+
+	// Say which transport is answering, once, before the request lines. Whether a
+	// request crossed a socket is otherwise invisible: an in-process request logs
+	// the same URL as a dialed one, because that is the URL it was built for. A
+	// context named "cortex" is served locally on the strength of its name alone,
+	// so --verbose has to be able to answer "did this reach the server I think it
+	// did?" — which for a URL pointing somewhere other than this machine is the
+	// difference between a stale answer and a wrong one.
+	if c.HTTPClient != nil {
+		if _, local := c.HTTPClient.Transport.(*inprocess.Transport); local {
+			fmt.Fprintf(errOut, "serving %s in-process; no request leaves this machine\n", c.BaseURL)
+		}
+	}
+
 	c.Logf = func(format string, args ...any) {
 		fmt.Fprintf(errOut, format+"\n", args...)
 	}

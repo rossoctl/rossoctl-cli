@@ -122,7 +122,12 @@ until you authorize.`,
 // It builds its own client from the target so the just-obtained token is used
 // regardless of how the effective server would otherwise resolve.
 func firstNamespace(cmd *cobra.Command, target *config.Context) string {
-	client := rossoctlclient.NewClient(target)
+	client, err := rossoctlclient.NewClient(target)
+	if err != nil {
+		// Best-effort, as documented above: a client that cannot be built means
+		// no namespace to suggest, not a failed login.
+		return ""
+	}
 	attachVerboseLogger(cmd, client)
 	resp, err := client.ListNamespaces(cmd.Context(), true)
 	if err != nil || len(resp.Namespaces) == 0 {

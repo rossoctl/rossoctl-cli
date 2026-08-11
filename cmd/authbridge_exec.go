@@ -178,7 +178,7 @@ container is stopped and the temporary directory removed when the command exits.
 This needs docker or podman on PATH ($ROSSOCORTEX_RUNTIME overrides which).
 
 While the command runs, exec records the instance as a <name>.json file in
-~/.config/rossocortex/namespaces/<namespace>, and removes it when the command
+~/.config/rossoctl/namespaces/<namespace>, and removes it when the command
 exits. The file names the instance, its namespace, the proxy container (with
 --proxyContainerImage), the inbound, session, and admin addresses as reached from
 this host, the inbound protocol, and the command line — so another tool can find

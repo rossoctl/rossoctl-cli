@@ -82,6 +82,8 @@ var implementedRoutes = map[string]bool{
 	http.MethodGet + " /agents/{namespace}/{name}":              true,
 	http.MethodGet + " /agents/{namespace}/{name}/route-status": true,
 	http.MethodGet + " /chat/{namespace}/{name}/agent-card":     true,
+	http.MethodGet + " /health":                                 true,
+	http.MethodGet + " /ready":                                  true,
 }
 
 // routeKey is the implementedRoutes key for r.
@@ -383,21 +385,49 @@ func TestAPIRoutesIsACopy(t *testing.T) {
 	}
 }
 
-// TestHealthServedAtRootAndPrefix verifies the root-level health probes are
-// reachable both at the root and under the mount path.
+// TestHealthServedAtRootAndPrefix verifies the root-level health probes answer at
+// both the root and the mount path, with the status word each reports.
+//
+// Both spellings are checked for each probe because a prober is pointed at
+// whichever it expects, and a 404 at one of them would strand it.
 func TestHealthServedAtRootAndPrefix(t *testing.T) {
 	ts := newTestServer(t, "/api/v1")
 
-	for _, p := range []string{"/health", "/ready", "/api/v1/health", "/api/v1/ready"} {
-		resp, err := http.Get(ts.URL + p)
-		if err != nil {
-			t.Fatalf("GET %s: %v", p, err)
-		}
-		resp.Body.Close()
-		// Routed but unimplemented; 404 would mean it is not registered.
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Errorf("GET %s status = %d, want %d", p, resp.StatusCode, http.StatusInternalServerError)
-		}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/health", "healthy"},
+		{"/ready", "ready"},
+		{"/api/v1/health", "healthy"},
+		{"/api/v1/ready", "ready"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want JSON", ct)
+			}
+
+			// Decoded rather than string-matched, so the assertion is on the wire
+			// shape a prober parses: exactly one "status" field.
+			var got Health
+			dec := json.NewDecoder(resp.Body)
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			if got.Status != tc.want {
+				t.Errorf("status = %q, want %q", got.Status, tc.want)
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/rossoctl-cli/internal/apiclient"
 	"github.com/rossoctl/rossoctl-cli/internal/config"
+	"github.com/rossoctl/rossoctl-cli/internal/inprocess"
 )
 
 // Rossoctl is the backend contract used by the command layer. Its methods are
@@ -71,19 +72,56 @@ type Rossoctl interface {
 // Compile-time assertion that the HTTP client implements Rossoctl.
 var _ Rossoctl = (*apiclient.Client)(nil)
 
-// NewClient builds a Rossoctl backend for ctx: an HTTP apiclient.Client for the
+// CortexContextName is the context name that selects the in-process transport.
+// A context so named is answered by a serve handler inside this process instead
+// of over a socket, so its commands work without a `rossoctl cortex serve`
+// daemon running.
+//
+// A name is the marker because nothing else distinguishes such a context: a
+// cortex is reached over HTTP like any other server, and the config's type field
+// is "api" for every context every command creates. The cost of that convention
+// is that a context named "cortex" pointed at a remote server is answered locally
+// instead — which --verbose reports on every request, since the transport names
+// itself in the log.
+const CortexContextName = "cortex"
+
+// NewClient builds a Rossoctl backend for ctx: an apiclient.Client for the
 // context's server and bearer token.
 //
-// Every context type reaches the API over HTTP, including TypeCortex. A cortex
-// context once had its own file-backed client reading agents.json directly; that
-// backend is gone, and a cortex is now reached the same way as any other server —
-// by pointing the context at a `rossoctl cortex serve` address.
+// There is one implementation for every context. A context named "cortex" gets a
+// transport that answers from a serve handler in this process rather than over a
+// socket, but it is the same apiclient.Client either way, so URL construction,
+// status handling, and JSON decoding are shared and the two paths cannot
+// disagree above the transport. A cortex context once had its own file-backed
+// client reading agents.json directly; that backend is gone, and substituting a
+// transport is what replaced it.
+//
+// The bearer token is set even for a cortex context. The serve handler ignores
+// credentials entirely, but dropping the token here would silently break a
+// context later repointed at a real server.
+//
+// An error is returned only when the in-process handler cannot be built — a
+// context with no server, or an unreadable instances directory. Falling back to
+// dialing in that case would send the command to a server the user did not ask
+// for, so the failure is reported instead.
 //
 // Verbose request logging is not wired here: callers that want it can type-
 // assert the result to *apiclient.Client and set its Logf field.
-func NewClient(ctx *config.Context) Rossoctl {
-	return &apiclient.Client{
+func NewClient(ctx *config.Context) (Rossoctl, error) {
+	client := &apiclient.Client{
 		BaseURL:     ctx.Server,
 		BearerToken: ctx.BearerToken,
 	}
+
+	if ctx.Name == CortexContextName {
+		httpClient, err := inprocess.New(ctx)
+		if err != nil {
+			return nil, err
+		}
+		client.HTTPClient = httpClient
+	}
+
+	// Any other context keeps HTTPClient nil, so apiclient supplies its own
+	// default with the timeout a real network call needs.
+	return client, nil
 }

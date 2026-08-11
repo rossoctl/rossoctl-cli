@@ -33,9 +33,15 @@ var cortexServeCmd = &cobra.Command{
 	Short: "Serve the rossoctl backend API locally",
 	Long: `Serve the rossoctl backend API on a local port.
 
+Run this to point a web UI at a local cortex. rossoctl's own commands do not
+need it: a context named "cortex" is answered by these same handlers inside the
+command's own process, so "agents list" works with nothing listening. Use
+"rossoctl config create-context --name cortex" for that, and this command when
+something other than rossoctl has to reach the API over HTTP.
+
 The server exposes the same set of operations as the backend's published
 OpenAPI document, so a UI pointed at it finds every endpoint it expects. Most
-are placeholders that answer 500 UNIMPLEMENTED. Six are real:
+are placeholders that answer 500 UNIMPLEMENTED. Nine are real:
 
   GET /auth/config              reports authentication as disabled
   GET /namespaces               reports --namespaces
@@ -44,9 +50,13 @@ are placeholders that answer 500 UNIMPLEMENTED. Six are real:
   GET /agents/{ns}/{name}       reports one instance in detail
   GET /agents/{ns}/{name}/route-status
                                 reports that an existing instance has a route
+  GET /chat/{ns}/{name}/agent-card
+                                proxies the agent's own A2A card
+  GET /health                   reports {"status":"healthy"}
+  GET /ready                    reports {"status":"ready"}
 
 The instance endpoints read the records "authbridge exec" writes under
-~/.config/rossocortex/namespaces/<namespace>, once per request, so an instance
+~/.config/rossoctl/namespaces/<namespace>, once per request, so an instance
 that starts or stops while the server runs is reflected without a restart.
 
 Every namespace directory is read, and each instance is reported in the namespace
@@ -91,7 +101,8 @@ The server runs until interrupted.`,
 
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Serving the rossoctl API on http://%s%s\n", ln.Addr(), srv.Path())
-		fmt.Fprintf(out, "GET /auth/config reports authentication as disabled, "+
+		fmt.Fprintf(out, "GET /health and GET /ready report the server is up, "+
+			"GET /auth/config reports authentication as disabled, "+
 			"GET /namespaces reports %s, and GET /agents, GET /tools and "+
 			"GET /agents/{namespace}/{name} report the locally running instances; "+
 			"other operations return 500 UNIMPLEMENTED.\n",

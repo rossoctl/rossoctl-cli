@@ -3,7 +3,7 @@
 // The API surface mirrors the OpenAPI document the real backend publishes at
 // /api/openapi.json: every operation in that document is routed here, so a UI
 // pointed at this server sees the same set of endpoints rather than a wall of
-// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Six are real:
+// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Nine are real:
 //
 //   - GET /auth/config reports authentication as disabled, so a UI can finish
 //     initializing without a Keycloak realm behind it.
@@ -15,6 +15,10 @@
 //   - GET /agents/{namespace}/{name}/route-status reports that an existing
 //     instance has a route, since one reached at its inbound address always
 //     does; it 404s exactly when the detail endpoint does.
+//   - GET /chat/{namespace}/{name}/agent-card fetches the agent card from the
+//     instance itself.
+//   - GET /health and GET /ready report the process is up and serving. Both are
+//     served at the site root and under the mount path.
 //
 // The instance endpoints read the instances directory on every request rather
 // than once at startup: instances are started and stopped by `authbridge exec`
@@ -163,8 +167,8 @@ var apiRoutes = []Route{
 // rather than under /api/v1. They are registered both at the root and under the
 // mount path, so a probe finds them wherever it looks.
 var healthRoutes = []Route{
-	{http.MethodGet, "/health", unimplemented},
-	{http.MethodGet, "/ready", unimplemented},
+	{http.MethodGet, "/health", healthRoute},
+	{http.MethodGet, "/ready", readyRoute},
 }
 
 // APIRoutes returns the operations served under the mount path. The result is a
@@ -190,6 +194,18 @@ type AuthConfig struct {
 // rather than null, because the schema marks it required.
 type NamespaceList struct {
 	Namespaces []string `json:"namespaces"`
+}
+
+// Health is the GET /health and GET /ready response: a single status word.
+//
+// One type serves both because the two responses differ only in that word.
+// Liveness and readiness are distinct questions in general — whether the process
+// is up, and whether it can serve traffic — but this server answers them from the
+// same state, since it is ready as soon as it is running. It holds no
+// connections to warm up and no caches to fill: every handler reads the
+// filesystem when the request arrives.
+type Health struct {
+	Status string `json:"status"`
 }
 
 // The response types are the shared ones from internal/agentapi, which the CLI's
@@ -413,6 +429,31 @@ func normalizePath(path string) string {
 		return ""
 	}
 	return "/" + path
+}
+
+// healthRoute serves GET /health, reporting the process is up.
+//
+// Reaching the handler is the whole check. There is no dependency to probe: the
+// server holds no connection pool and no database, and a request that arrives
+// here has already proved the listener is accepting and the mux is routing.
+// Testing something further would report on that thing's health rather than this
+// server's.
+func healthRoute(opts) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, Health{Status: "healthy"})
+	}
+}
+
+// readyRoute serves GET /ready, reporting the server can serve traffic.
+//
+// It answers unconditionally, for the reason given on Health: this server is
+// ready the moment it is listening. In particular it does not check that any
+// instance records exist — a cortex with nothing running is correctly serving an
+// empty list, not unready.
+func readyRoute(opts) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, Health{Status: "ready"})
+	}
 }
 
 // authConfigRoute serves GET /auth/config, reporting auth as disabled: a UI asks

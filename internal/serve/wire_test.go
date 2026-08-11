@@ -120,7 +120,11 @@ func TestServerAndClientShareOneType(t *testing.T) {
 // envelope differs by design (this server has one type where the client has two),
 // so only the entries are compared.
 func TestSummaryWireShapeMatchesClientType(t *testing.T) {
-	stubGetter(t, mixedInstances())
+	// The list handlers read lister, not getter. Stubbing only the getter left
+	// lister pointing at the real instances.List, so this test read the developer's
+	// own ~/.config/rossoctl/namespaces: it passed on a machine that happened to
+	// have a2a instances recorded and failed on one that did not.
+	stubLister(t, mixedInstances(), nil)
 	ts := newTestServer(t, "/api/v1")
 
 	res, err := http.Get(ts.URL + "/api/v1/agents")

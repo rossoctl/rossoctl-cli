@@ -21,7 +21,7 @@ func instancesDir(t *testing.T, namespace string) string {
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
-	return filepath.Join(home, ".config", "rossocortex", "namespaces", namespace)
+	return filepath.Join(home, ".config", "rossoctl", "namespaces", namespace)
 }
 
 // defaultInstancesDir is instancesDir for the namespace exec falls back to when
