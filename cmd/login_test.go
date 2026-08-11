@@ -350,6 +350,125 @@ func TestLoginNoServerUsesCurrentContext(t *testing.T) {
 	}
 }
 
+// TestLoginContextStoresTokenOnThatContext covers --context: the token must land
+// on the named context, not the current one. Storing it on the current context
+// would put a token issued by one server against another server's URL, since
+// --context already decides which server the login talks to.
+func TestLoginContextStoresTokenOnThatContext(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "target", "--server", "http://target/api/v1/"); err != nil {
+		t.Fatalf("create-context target: %v", err)
+	}
+	// current is created second, so it is the current context.
+	if _, err := execute(t, "config", "create-context",
+		"--name", "current", "--server", "http://current/api/v1/"); err != nil {
+		t.Fatalf("create-context current: %v", err)
+	}
+
+	out, err := execute(t, "--context", "target", "login", "--token", "tok")
+	if err != nil {
+		t.Fatalf("login: %v\n%s", err, out)
+	}
+
+	cfg, _ := config.Load(path)
+	target, _ := cfg.Get("target")
+	if target.BearerToken != "tok" {
+		t.Errorf("target token = %q, want tok", target.BearerToken)
+	}
+	if cur, _ := cfg.Get("current"); cur.BearerToken != "" {
+		t.Errorf("the current context was written to; token = %q, want empty", cur.BearerToken)
+	}
+	// The report has to name where the token actually went, or a user cannot
+	// tell this case from the bug it replaces.
+	if !strings.Contains(out, `"target"`) {
+		t.Errorf("output does not name the target context:\n%s", out)
+	}
+}
+
+// TestLoginContextLeavesCurrentUnchanged pins that --context does not switch the
+// persistent selection. Unlike --server it names a context that already exists,
+// so changing which one is current as a side effect would be a surprise.
+func TestLoginContextLeavesCurrentUnchanged(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "target", "--server", "http://target/api/v1/"); err != nil {
+		t.Fatalf("create-context target: %v", err)
+	}
+	if _, err := execute(t, "config", "create-context",
+		"--name", "current", "--server", "http://current/api/v1/"); err != nil {
+		t.Fatalf("create-context current: %v", err)
+	}
+
+	if _, err := execute(t, "--context", "target", "login", "--token", "tok"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	cfg, _ := config.Load(path)
+	if cfg.CurrentContext != "current" {
+		t.Errorf("current context = %q, want it left at %q", cfg.CurrentContext, "current")
+	}
+}
+
+// TestLoginContextRejectsUnknownContext verifies --context never creates a
+// context, matching resolveContext: a typo must fail rather than silently
+// bringing a half-configured context into existence and reporting success.
+func TestLoginContextRejectsUnknownContext(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "real", "--server", "http://real/api/v1/"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	out, err := execute(t, "--context", "nosuch", "login", "--token", "tok")
+	if err == nil {
+		t.Fatalf("login with an unknown --context succeeded:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "nosuch") {
+		t.Errorf("error = %v, want it to name the unknown context", err)
+	}
+
+	cfg, _ := config.Load(path)
+	if _, ok := cfg.Get("nosuch"); ok {
+		t.Error("the unknown context was created")
+	}
+	if real, _ := cfg.Get("real"); real.BearerToken != "" {
+		t.Errorf("a token was stored despite the failure: %q", real.BearerToken)
+	}
+}
+
+// TestLoginServerBeatsContext pins the precedence between the two flags, which
+// was settled before --context was honored here: --server may create a context
+// and make it current, so it stays the stronger selector.
+func TestLoginServerBeatsContext(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "target", "--server", "http://target/api/v1/"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	if _, err := execute(t, "--context", "target",
+		"--server", "http://other.example:8080/api/v1/", "login", "--token", "tok"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	cfg, _ := config.Load(path)
+	if target, _ := cfg.Get("target"); target.BearerToken != "" {
+		t.Errorf("--context won over --server; target token = %q", target.BearerToken)
+	}
+	byHost, ok := cfg.Get(config.ContextNameForServer("http://other.example:8080/api/v1/"))
+	if !ok {
+		t.Fatal("--server did not create its hostname context")
+	}
+	if byHost.BearerToken != "tok" {
+		t.Errorf("hostname context token = %q, want tok", byHost.BearerToken)
+	}
+}
+
 // TestLoginSuggestsAuthStatus pins the pointer to `auth status`: the token's
 // roles and audiences decide what now works, and login is when the user has them.
 func TestLoginSuggestsAuthStatus(t *testing.T) {

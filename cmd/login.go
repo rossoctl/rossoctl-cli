@@ -23,8 +23,10 @@ var loginCmd = &cobra.Command{
 
 With --server, the token is stored on the context named after that server's
 hostname, creating it if none exists, and that context becomes current.
-Without --server, the token is stored on the current context (a context is
-created from the default server if the config is empty).
+With --context, the token is stored on that context, which must already exist;
+which context is current is left unchanged. With neither, the token is stored
+on the current context (a context is created from the default server if the
+config is empty).
 
 With --token, the given token is stored directly. Without --token, an OAuth 2.0
 device authorization flow is run against the server's Keycloak: rossoctl reads
@@ -42,10 +44,12 @@ until you authorize.`,
 		//   - With an explicit --server, target the context named after that
 		//     server's hostname, creating it if none exists, and make it
 		//     current.
-		//   - Without --server, log into the current context (loadConfig has
+		//   - With --context, target that context, which must already exist.
+		//   - With neither, log into the current context (loadConfig has
 		//     already seeded one if the config was empty).
 		var target *config.Context
-		if cmd.Flags().Changed("server") {
+		switch {
+		case cmd.Flags().Changed("server"):
 			name := config.ContextNameForServer(server)
 			if existing, ok := cfg.Get(name); ok {
 				target = existing
@@ -56,7 +60,23 @@ until you authorize.`,
 			if err := cfg.SetCurrent(name); err != nil {
 				return err
 			}
-		} else {
+		case contextOverride != "":
+			// The token has to land on the context the rest of the command
+			// already used: resolveContext feeds --context to the device flow's
+			// server, so saving to the current context instead would store a
+			// token issued by one server against another one's URL.
+			//
+			// Unlike the --server case this does not change which context is
+			// current. --context names a context that already exists and says
+			// which one this invocation acts on; switching the persistent
+			// selection as a side effect of that is a surprise, and --server has
+			// a reason --context lacks — it may have just created the context.
+			existing, ok := cfg.Get(contextOverride)
+			if !ok {
+				return fmt.Errorf("no context named %q", contextOverride)
+			}
+			target = existing
+		default:
 			cur, ok := cfg.Current()
 			if !ok {
 				// loadConfig seeds a current context, so this should not happen.
