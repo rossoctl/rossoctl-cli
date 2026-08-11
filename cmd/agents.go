@@ -173,9 +173,18 @@ func init() {
 
 	agentsCardCmd.Flags().BoolVar(&agentsCardJSON, "json", false, "print the raw JSON response unchanged")
 
+	chatFlags := agentsChatCmd.Flags()
+	chatFlags.StringVar(&agentsChatArgs.address, "address", "",
+		"URL of the A2A agent (default: the URL from the agent's card)")
+	chatFlags.StringVar(&agentsChatArgs.transport, "transport", defaultA2ATransport,
+		"protocol binding to use: jsonrpc, grpc, or http+json")
+	chatFlags.StringVar(&agentsChatArgs.message, "message", "", "message text to send (required)")
+	chatFlags.BoolVar(&agentsChatArgs.withAuthorization, "with-authorization", false,
+		"attach the context's bearer token as an Authorization header")
+
 	agentsCmd.AddCommand(
 		agentsCardCmd,
-		newLeaf("chat [name]", "Start an interactive chat with an agent"),
+		agentsChatCmd,
 		agentsDeleteCmd,
 		newAgentsImportCmd(),
 		agentsGetCmd,

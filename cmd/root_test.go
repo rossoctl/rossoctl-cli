@@ -161,11 +161,16 @@ func TestVersionCommand(t *testing.T) {
 // unimplementedCommands lists every documented leaf command, addressed by its
 // full path from the root. Each must print UNIMPLEMENTED and exit without
 // error.
+// It is currently empty: every documented leaf is implemented, and the only
+// remaining stubs are subcommands with their own coverage (`agents import
+// from-source`, `tools import from-source`). The table and its test stay so the
+// next stub added is covered without rebuilding them.
 var unimplementedCommands = [][]string{
 	// "install" is implemented (prints setup instructions); tested in install_test.go.
 	// "login" is implemented (sets the current context's token); tested in login_test.go.
 	// "status" is implemented (auth + platform status); tested in status_test.go.
-	{"agents", "chat"},
+	// "agents chat" is implemented (streams an A2A message to a named agent);
+	// tested in agents_chat_test.go.
 	// "agents delete" is implemented (DELETE /agents/<ns>/<name>); tested in
 	// agents_delete_test.go.
 	// "agents import" has its own from-image/from-source subcommands (tested
@@ -181,14 +186,7 @@ var unimplementedCommands = [][]string{
 // their status in subcommand listings: their Short description begins with
 // "UNIMPLEMENTED", while implemented commands do not.
 func TestUnimplementedDescriptionsPrefixed(t *testing.T) {
-	// A stub leaf: `agents chat`.
-	if c, _, _ := rootCmd.Find([]string{"agents", "chat"}); c == nil {
-		t.Fatal("agents chat not found")
-	} else if !strings.HasPrefix(c.Short, "UNIMPLEMENTED") {
-		t.Errorf("stub `agents chat` Short = %q, want UNIMPLEMENTED prefix", c.Short)
-	}
-
-	// A stub import subcommand: `agents import from-source`.
+	// A stub: `agents import from-source`.
 	if c, _, _ := rootCmd.Find([]string{"agents", "import", "from-source"}); c == nil {
 		t.Fatal("agents import from-source not found")
 	} else if !strings.HasPrefix(c.Short, "UNIMPLEMENTED") {
@@ -202,13 +200,16 @@ func TestUnimplementedDescriptionsPrefixed(t *testing.T) {
 		t.Errorf("implemented `agents list` Short = %q, should not be prefixed", c.Short)
 	}
 
-	// The listing shown by `rossoctl agents` must surface the prefix.
-	out, err := execute(t, "agents")
+	// The subcommand listing containing a stub must surface the prefix. That is
+	// `rossoctl agents import` rather than `rossoctl agents`: every leaf directly
+	// under the agents group is implemented now, and the remaining stub is a
+	// level deeper.
+	out, err := execute(t, "agents", "import")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out, "UNIMPLEMENTED:") {
-		t.Errorf("`agents` help does not surface UNIMPLEMENTED status:\n%s", out)
+		t.Errorf("`agents import` help does not surface UNIMPLEMENTED status:\n%s", out)
 	}
 }
 

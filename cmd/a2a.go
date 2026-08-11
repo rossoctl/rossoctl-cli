@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -87,7 +90,11 @@ until it finishes.
 
 With --with-authorization the effective context's bearer token is attached to
 each request as an Authorization header, for agents that sit behind an
-authenticating proxy.`,
+authenticating proxy. Note the token is sent to whatever --address names, so
+point it only at agents you would hand that credential to.
+
+With --verbose each request and its status are reported on stderr, leaving the
+streamed events alone on stdout.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if a2aSendArgs.address == "" {
@@ -97,47 +104,191 @@ authenticating proxy.`,
 			return fmt.Errorf("--message is required")
 		}
 
-		protocol, err := a2aTransport(a2aSendArgs.transport)
+		return streamA2AMessage(cmd, a2aSendOptions{
+			address:           a2aSendArgs.address,
+			transport:         a2aSendArgs.transport,
+			message:           a2aSendArgs.message,
+			withAuthorization: a2aSendArgs.withAuthorization,
+		})
+	},
+}
+
+// a2aSendOptions is one A2A send: who to talk to, how, and what to say.
+type a2aSendOptions struct {
+	address           string
+	transport         string
+	message           string
+	withAuthorization bool
+}
+
+// a2aLogger is an http.RoundTripper that logs each A2A request and its status,
+// and remembers the last status seen.
+//
+// This lives at the HTTP layer rather than in an a2aclient.CallInterceptor,
+// which is the more obvious home, for two reasons found by observing the client:
+//
+//   - The interceptor's After hook runs once per streamed event, so logging a
+//     response there would print a line per event and duplicate the event
+//     output the command already prints.
+//   - a2aclient's transports discard the HTTP status: a non-200 becomes
+//     fmt.Errorf("unexpected HTTP status: %s"), an untyped error carrying no
+//     code. A 401 is therefore not detectable from the error without matching
+//     that string, which is the library's own wording and free to change.
+//     Here the status is read before the library flattens it.
+//
+// It wraps whatever RoundTripper it is given, so the caller decides the
+// underlying transport.
+type a2aLogger struct {
+	rt http.RoundTripper
+
+	// logf, if non-nil, is called with one line per request and per response.
+	logf func(format string, args ...any)
+
+	// status is the HTTP status of the last response received, or 0 if no
+	// response ever arrived (a dial failure, say). It is read after the request
+	// completes to decide which hint to offer, so no locking is needed: the
+	// commands here issue one A2A call at a time and read this only once the
+	// stream has ended.
+	status int
+}
+
+func (l *a2aLogger) log(format string, args ...any) {
+	if l.logf != nil {
+		l.logf(format, args...)
+	}
+}
+
+func (l *a2aLogger) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The URL is logged rather than the body: a request body is the A2A payload,
+	// which carries the message text and can be large, and --verbose is about
+	// which calls were made rather than their contents.
+	l.log("%s %s", req.Method, req.URL)
+	start := time.Now()
+
+	rt := l.rt
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	resp, err := rt.RoundTrip(req)
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		// Deliberately does not set status: there was no response, and leaving it
+		// 0 keeps "never got an answer" distinct from any real status.
+		l.log("%s %s failed after %s: %v", req.Method, req.URL, elapsed, err)
+		return resp, err
+	}
+	l.status = resp.StatusCode
+	l.log("%s %s -> %s (%s)", req.Method, req.URL, resp.Status, elapsed)
+	return resp, nil
+}
+
+// a2aUnauthorizedHint returns the advice to offer when an A2A call failed with
+// 401, or "" when the failure was anything else.
+//
+// The two cases need different advice because the user's next step differs. With
+// no token sent there is a credential to add; with one sent and still rejected
+// the token itself is the thing to inspect — and a token predating an agent may
+// simply lack its scope, which no amount of retrying fixes but a fresh login
+// does.
+func a2aUnauthorizedHint(status int, withAuthorization bool) string {
+	if status != http.StatusUnauthorized {
+		return ""
+	}
+	if !withAuthorization {
+		return "Hint: the agent requires credentials and none were sent. " +
+			"Retry with --with-authorization to attach the context's bearer token."
+	}
+	return "Hint: the agent rejected the bearer token that was sent. " +
+		"Run `rossoctl auth status` to inspect it — and if the agent was created after you signed in, " +
+		"run `rossoctl login` again to pick up the scopes for it."
+}
+
+// streamA2AMessage sends one message to an A2A agent and prints the events it
+// streams back.
+//
+// This is the whole of `a2a send` minus flag validation, factored out so
+// `agents chat` is the same code rather than a copy of it: the two commands
+// differ only in how they learn the agent's address, and a second
+// implementation would let their transport handling, authorization, and event
+// rendering drift apart.
+//
+// The caller is responsible for rejecting an empty address and message, since
+// what makes them missing differs — a flag the user omitted, or an agent card
+// that carried no URL — and so does the error worth reporting.
+func streamA2AMessage(cmd *cobra.Command, opts a2aSendOptions) error {
+	protocol, err := a2aTransport(opts.transport)
+	if err != nil {
+		return err
+	}
+
+	var factoryOpts []a2aclient.FactoryOption
+	if opts.withAuthorization {
+		_, token, err := resolveServer()
 		if err != nil {
 			return err
 		}
-
-		var opts []a2aclient.FactoryOption
-		if a2aSendArgs.withAuthorization {
-			_, token, err := resolveServer()
-			if err != nil {
-				return err
-			}
-			if token == "" {
-				return fmt.Errorf("--with-authorization given but the current context has no bearer token; run `rossoctl login` to sign in")
-			}
-			opts = append(opts, a2aclient.WithCallInterceptors(&bearerInterceptor{token: token}))
+		if token == "" {
+			return fmt.Errorf("--with-authorization given but the current context has no bearer token; run `rossoctl login` to sign in")
 		}
+		factoryOpts = append(factoryOpts, a2aclient.WithCallInterceptors(&bearerInterceptor{token: token}))
+	}
 
-		ctx := cmd.Context()
-		iface := a2a.NewAgentInterface(a2aSendArgs.address, protocol)
-		client, err := a2aclient.NewFromEndpoints(ctx, []*a2a.AgentInterface{iface}, opts...)
+	// Route the HTTP-based bindings through a2aLogger, which supplies both the
+	// --verbose request lines and the status a 401 hint needs. The client's own
+	// interceptors cannot do either (see a2aLogger).
+	logger := &a2aLogger{}
+	if verbose {
+		errOut := cmd.ErrOrStderr()
+		logger.logf = func(format string, args ...any) {
+			fmt.Fprintf(errOut, format+"\n", args...)
+		}
+	}
+	httpClient := &http.Client{Transport: logger}
+	factoryOpts = append(factoryOpts,
+		a2aclient.WithTransport(a2a.TransportProtocolJSONRPC,
+			a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+				return a2aclient.NewJSONRPCTransport(iface.URL, httpClient), nil
+			})),
+		a2aclient.WithTransport(a2a.TransportProtocolHTTPJSON,
+			a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
+				u, err := url.Parse(iface.URL)
+				if err != nil {
+					return nil, fmt.Errorf("parsing agent URL %q: %w", iface.URL, err)
+				}
+				return a2aclient.NewRESTTransport(u, httpClient), nil
+			})),
+	)
+
+	ctx := cmd.Context()
+	iface := a2a.NewAgentInterface(opts.address, protocol)
+	client, err := a2aclient.NewFromEndpoints(ctx, []*a2a.AgentInterface{iface}, factoryOpts...)
+	if err != nil {
+		return fmt.Errorf("connecting to %s: %w", opts.address, err)
+	}
+	defer func() { _ = client.Destroy() }()
+
+	req := &a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(opts.message)),
+	}
+
+	out := cmd.OutOrStdout()
+	for event, err := range client.SendStreamingMessage(ctx, req) {
+		// The iterator reports a failed call by yielding an error; stop at
+		// the first one rather than continuing to print, since the stream
+		// is not resumable.
 		if err != nil {
-			return fmt.Errorf("connecting to %s: %w", a2aSendArgs.address, err)
-		}
-		defer func() { _ = client.Destroy() }()
-
-		req := &a2a.SendMessageRequest{
-			Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(a2aSendArgs.message)),
-		}
-
-		out := cmd.OutOrStdout()
-		for event, err := range client.SendStreamingMessage(ctx, req) {
-			// The iterator reports a failed call by yielding an error; stop at
-			// the first one rather than continuing to print, since the stream
-			// is not resumable.
-			if err != nil {
-				return err
+			// A 401 says nothing about what to do next, so the remedy is named
+			// here. The hint goes to stderr and the error is still returned
+			// unchanged, so it stays out of piped output and the exit status is
+			// unaffected.
+			if hint := a2aUnauthorizedHint(logger.status, opts.withAuthorization); hint != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), hint)
 			}
-			printA2AEvent(out, event)
+			return err
 		}
-		return nil
-	},
+		printA2AEvent(out, event)
+	}
+	return nil
 }
 
 // printA2AEvent prints one streamed event as a single line.

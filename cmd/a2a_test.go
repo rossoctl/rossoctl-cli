@@ -393,3 +393,159 @@ func TestA2ASendWithAuthorizationNoToken(t *testing.T) {
 		t.Errorf("error = %q, want it to mention the missing bearer token", err)
 	}
 }
+
+// newRejectingAgent starts a server that answers every request with the given
+// status, standing in for an agent behind a proxy that rejects the call.
+func newRejectingAgent(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestA2AVerboseLogsRequests verifies --verbose reports the A2A calls on stderr
+// while stdout keeps only the streamed events. Before the logging transport the
+// A2A calls were invisible under -v: it instrumented the platform API client
+// only, so the request the command exists to make was the one thing not logged.
+func TestA2AVerboseLogsRequests(t *testing.T) {
+	srv, _ := newEchoServer(t)
+
+	stdout, stderr, err := executeSplit(t, "a2a", "send",
+		"--address", srv.URL, "--message", "hi", "--verbose")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The request and its status, both naming the agent's URL.
+	if !strings.Contains(stderr, "POST "+srv.URL) {
+		t.Errorf("stderr missing the request line:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "200 OK") {
+		t.Errorf("stderr missing the response status:\n%s", stderr)
+	}
+	// Verbose output must not contaminate the results.
+	if strings.Contains(stdout, "POST ") {
+		t.Errorf("verbose logging leaked into stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "echo: hi") {
+		t.Errorf("stdout missing the streamed events:\n%s", stdout)
+	}
+}
+
+// TestA2AQuietWithoutVerbose verifies the logging transport stays silent when
+// --verbose is not given, since it is installed either way.
+func TestA2AQuietWithoutVerbose(t *testing.T) {
+	srv, _ := newEchoServer(t)
+
+	_, stderr, err := executeSplit(t, "a2a", "send", "--address", srv.URL, "--message", "hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr != "" {
+		t.Errorf("stderr should be empty without --verbose, got:\n%s", stderr)
+	}
+}
+
+// TestA2AVerboseLogsFailedRequest verifies a request that never got a response
+// is still reported, rather than -v going quiet exactly when it is most useful.
+func TestA2AVerboseLogsFailedRequest(t *testing.T) {
+	// A server closed immediately: the port is refused rather than unroutable, so
+	// this fails fast instead of waiting for a dial timeout.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := dead.URL
+	dead.Close()
+
+	_, stderr, err := executeSplit(t, "a2a", "send",
+		"--address", addr, "--message", "hi", "--verbose")
+	if err == nil {
+		t.Fatal("sending to a closed port should fail")
+	}
+	if !strings.Contains(stderr, "failed after") {
+		t.Errorf("stderr should report the failed request:\n%s", stderr)
+	}
+}
+
+// TestA2AVerboseLogsHTTPJSONTransport verifies the HTTP+JSON binding is logged
+// too. Each binding gets its own transport built on the logging client, so this
+// pins that the second registration was not forgotten.
+func TestA2AVerboseLogsHTTPJSONTransport(t *testing.T) {
+	srv := newRejectingAgent(t, http.StatusOK)
+
+	_, stderr, _ := executeSplit(t, "a2a", "send",
+		"--address", srv.URL, "--message", "hi",
+		"--transport", "http+json", "--verbose")
+	if !strings.Contains(stderr, srv.URL) {
+		t.Errorf("stderr missing the http+json request:\n%s", stderr)
+	}
+}
+
+// TestA2AUnauthorizedHint covers the advice offered for a rejected call
+// directly, including the cases that must stay silent.
+func TestA2AUnauthorizedHint(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		withAuth  bool
+		wantEmpty bool
+		wants     []string
+	}{
+		{
+			name:   "401 without the flag names the flag",
+			status: http.StatusUnauthorized,
+			wants:  []string{"--with-authorization"},
+		},
+		{
+			name:     "401 with the flag names auth status and login",
+			status:   http.StatusUnauthorized,
+			withAuth: true,
+			wants:    []string{"auth status", "login"},
+		},
+		// A 403 is an authenticated identity without permission: neither adding a
+		// token nor inspecting one changes the answer.
+		{name: "403 is permission, not credentials", status: http.StatusForbidden, wantEmpty: true},
+		{name: "500", status: http.StatusInternalServerError, wantEmpty: true},
+		{name: "200", status: http.StatusOK, wantEmpty: true},
+		// No response ever arrived, so there is no status to reason about.
+		{name: "no response", status: 0, wantEmpty: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := a2aUnauthorizedHint(tc.status, tc.withAuth)
+			if tc.wantEmpty {
+				if got != "" {
+					t.Errorf("hint = %q, want none", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatal("expected a hint")
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(got, want) {
+					t.Errorf("hint = %q, want it to mention %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestA2ASend401HintEndToEnd verifies the hint reaches stderr from a real
+// rejected call, and that the command still fails: the hint is advice, not a
+// recovery.
+func TestA2ASend401HintEndToEnd(t *testing.T) {
+	srv := newRejectingAgent(t, http.StatusUnauthorized)
+
+	stdout, stderr, err := executeSplit(t, "a2a", "send", "--address", srv.URL, "--message", "hi")
+	if err == nil {
+		t.Fatal("a 401 should fail the command")
+	}
+	if !strings.Contains(stderr, "--with-authorization") {
+		t.Errorf("stderr missing the hint:\n%s", stderr)
+	}
+	// Advice belongs on stderr, so piped output stays usable.
+	if strings.Contains(stdout, "Hint:") {
+		t.Errorf("hint leaked into stdout:\n%s", stdout)
+	}
+}
