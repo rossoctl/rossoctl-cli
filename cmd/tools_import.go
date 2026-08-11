@@ -54,6 +54,7 @@ func newToolsImportFromImageCmd() *cobra.Command {
 	var (
 		name            string
 		envVarsURL      string
+		envVarFlags     []string
 		containerImage  string
 		imagePullSecret string
 		ports           []string
@@ -65,8 +66,11 @@ func newToolsImportFromImageCmd() *cobra.Command {
 		Long: `Import a tool from an existing container image (POST <server>/tools).
 
 The tool is created in the namespace from the tools --namespace flag, or the
-current context's namespace. --deployment-type selects the workload type. Env
-vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
+current context's namespace. --deployment-type selects the workload type.
+
+Env vars come from --envVarsURL (a document of newline-separated key=value
+pairs) and from --envVar key=value, which may be repeated. When both name the
+same variable, --envVar wins, whatever order the flags appear in.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if name == "" {
@@ -81,10 +85,17 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 				return err
 			}
 
-			envVars, err := fetchEnvVars(cmd.Context(), cmd, envVarsURL)
+			docEnvVars, err := fetchEnvVars(cmd.Context(), cmd, envVarsURL)
 			if err != nil {
 				return err
 			}
+			flagEnvVars, err := parseEnvVarFlags(envVarFlags)
+			if err != nil {
+				return err
+			}
+			// Document first, flags second: an explicit --envVar wins over the
+			// fetched document for the same name.
+			envVars := mergeEnvVars(docEnvVars, flagEnvVars)
 
 			servicePorts, err := parseServicePorts(ports)
 			if err != nil {
@@ -118,6 +129,12 @@ vars are fetched from --envVarsURL (newline-separated key=value pairs).`,
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "", "name of the tool (required)")
 	f.StringVar(&envVarsURL, "envVarsURL", "", "URL to fetch environment variables from (newline-separated key=value)")
+	// StringArrayVar rather than the StringSliceVar used by --ports below, and the
+	// default must stay nil: see the note in agents_import.go. In short, an env
+	// value may legitimately contain commas or quotes, which a StringSlice would
+	// split or reject, while a port spec never does.
+	f.StringArrayVar(&envVarFlags, "envVar", nil,
+		"environment variable as key=value (repeatable; wins over --envVarsURL for the same name)")
 	f.StringVar(&containerImage, "containerImage", "", "container image to deploy (required)")
 	f.StringVar(&imagePullSecret, "imagePullSecret", "", "name of the image pull secret")
 	f.StringSliceVar(&ports, "ports", defaultToolPorts,
@@ -182,11 +199,12 @@ func parseServicePorts(specs []string) ([]apiclient.CreateServicePort, error) {
 
 func newToolsImportFromSourceCmd() *cobra.Command {
 	var (
-		name       string
-		envVarsURL string
-		gitURL     string
-		gitPath    string
-		gitBranch  string
+		name        string
+		envVarsURL  string
+		envVarFlags []string
+		gitURL      string
+		gitPath     string
+		gitBranch   string
 	)
 
 	cmd := &cobra.Command{
@@ -201,6 +219,9 @@ func newToolsImportFromSourceCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "", "name of the tool")
 	f.StringVar(&envVarsURL, "envVarsURL", "", "URL to fetch environment variables from")
+	// Declared for parity with --envVarsURL above and unread for the same reason:
+	// this subcommand is a stub.
+	f.StringArrayVar(&envVarFlags, "envVar", nil, "environment variable as key=value (repeatable)")
 	f.StringVar(&gitURL, "gitUrl", "", "git repository URL to build from")
 	f.StringVar(&gitPath, "gitPath", "", "path within the git repository")
 	f.StringVar(&gitBranch, "gitBranch", "main", "git branch to build from")

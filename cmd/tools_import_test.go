@@ -200,19 +200,140 @@ func TestToolsImportFromImageEnvVars(t *testing.T) {
 	t.Cleanup(srv.Close)
 	setupToolsImportContext(t, srv, "team1")
 
+	// One --envVar alongside the document, naming a variable the document does
+	// not: all three arrive, document pairs first.
 	if _, err := execute(t, "tools", "import", "from-image",
 		"--name", "weather-mcp", "--containerImage", "img",
-		"--envVarsURL", srv.URL+"/env"); err != nil {
+		"--envVarsURL", srv.URL+"/env",
+		"--envVar", "EXTRA=fromflag"); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 
 	envVars, ok := body["envVars"].([]any)
-	if !ok || len(envVars) != 2 {
-		t.Fatalf("envVars = %+v, want 2 entries", body["envVars"])
+	if !ok || len(envVars) != 3 {
+		t.Fatalf("envVars = %+v, want 3 entries", body["envVars"])
 	}
 	first := envVars[0].(map[string]any)
 	if first["name"] != "FOO" || first["value"] != "bar" {
 		t.Errorf("envVars[0] = %+v, want {FOO bar}", first)
+	}
+	if got := renderEnvVars(t, body); got != "FOO=bar BAZ=qux EXTRA=fromflag" {
+		t.Errorf("envVars = %q, want the document's pairs before the flag's", got)
+	}
+}
+
+// TestToolsImportFromImageEnvVarOverridesURL is the tools counterpart of the
+// agents test of the same name: --envVar beats --envVarsURL for a repeated name,
+// independent of flag position.
+func TestToolsImportFromImageEnvVarOverridesURL(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/env":
+			_, _ = w.Write([]byte("FOO=fromdoc\nBAZ=qux\n"))
+		case r.URL.Path == "/api/v1/namespaces":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case r.URL.Path == "/api/v1/tools" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_, _ = w.Write([]byte(`{"success":true,"message":"ok"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	setupToolsImportContext(t, srv, "team1")
+
+	const want = "FOO=fromflag BAZ=qux"
+
+	for _, order := range []struct {
+		name string
+		args []string
+	}{
+		{"url first", []string{"--envVarsURL", srv.URL + "/env", "--envVar", "FOO=fromflag"}},
+		{"flag first", []string{"--envVar", "FOO=fromflag", "--envVarsURL", srv.URL + "/env"}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			body = nil
+			args := append([]string{"tools", "import", "from-image",
+				"--name", "weather-mcp", "--containerImage", "img"}, order.args...)
+			if _, err := execute(t, args...); err != nil {
+				t.Fatalf("import: %v", err)
+			}
+			if got := renderEnvVars(t, body); got != want {
+				t.Errorf("envVars = %q, want %q regardless of flag position", got, want)
+			}
+		})
+	}
+}
+
+// TestToolsImportFromImageEnvVarLiteralComma verifies values are not CSV-split.
+//
+// Kept on both commands rather than shared, because it guards this file's own
+// flag registration — and this is the file where --envVar sits directly beside
+// --ports, which really is a StringSlice.
+func TestToolsImportFromImageEnvVarLiteralComma(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "tools", "import", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img",
+		"--envVar", "TAGS=a,b,c",
+		"--envVar", `JSON={"k":"v"}`,
+		"--envVar", "EMPTY="); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if got := renderEnvVars(t, body); got != `TAGS=a,b,c JSON={"k":"v"} EMPTY=` {
+		t.Errorf("envVars = %q; values must arrive literally, unsplit", got)
+	}
+}
+
+// TestToolsImportEnvVarFlagSurface verifies both subcommands document --envVar and
+// register it as a string array — and that --ports remains a stringSlice, since
+// the two flags differing is the deliberate part.
+func TestToolsImportEnvVarFlagSurface(t *testing.T) {
+	isolateHome(t)
+	for _, sub := range []string{"from-image", "from-source"} {
+		out, err := execute(t, "tools", "import", sub, "--help")
+		if err != nil {
+			t.Errorf("%s --help: %v", sub, err)
+			continue
+		}
+		if !strings.Contains(out, "--envVar ") {
+			t.Errorf("%s --help does not document --envVar:\n%s", sub, out)
+		}
+
+		cmd, _, err := rootCmd.Find([]string{"tools", "import", sub})
+		if err != nil {
+			t.Fatalf("could not find %s: %v", sub, err)
+		}
+		f := cmd.Flags().Lookup("envVar")
+		if f == nil {
+			t.Fatalf("%s has no --envVar flag", sub)
+		}
+		if f.Value.Type() != "stringArray" {
+			t.Errorf("%s --envVar is a %s; it must be a stringArray, or values are CSV-split",
+				sub, f.Value.Type())
+		}
+	}
+
+	// --ports stays comma-splittable; its help documents that, and a port spec
+	// never contains a comma.
+	cmd, _, err := rootCmd.Find([]string{"tools", "import", "from-image"})
+	if err != nil {
+		t.Fatalf("could not find from-image: %v", err)
+	}
+	if f := cmd.Flags().Lookup("ports"); f == nil {
+		t.Error("from-image has no --ports flag")
+	} else if f.Value.Type() != "stringSlice" {
+		t.Errorf("--ports is a %s, want stringSlice; its help promises comma-separated values",
+			f.Value.Type())
 	}
 }
 
