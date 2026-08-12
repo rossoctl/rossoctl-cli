@@ -9,6 +9,41 @@ import (
 	"github.com/rossoctl/rossoctl-cli/internal/inprocess"
 )
 
+// TestCortexContextNameMatchesConfig verifies the two spellings of the cortex
+// context name agree.
+//
+// config declares its own copy because this package imports config, so config
+// cannot import back to share the constant. Nothing else would notice them
+// drifting: a config seeded with one name and routed on the other would quietly
+// dial localhost:9097 instead of answering in-process, and every test that builds
+// its context by constant would keep passing. This test lives here because this
+// is the side that can see both.
+func TestCortexContextNameMatchesConfig(t *testing.T) {
+	if config.CortexContextName != CortexContextName {
+		t.Errorf("config.CortexContextName = %q, rossoctlclient.CortexContextName = %q; they must match or seeded cortex contexts stop being served in-process",
+			config.CortexContextName, CortexContextName)
+	}
+}
+
+// TestSeededCortexContextIsServedInProcess verifies the context config seeds is
+// actually routed locally — the two constants agreeing is necessary but not
+// sufficient, since the seeded context must also carry a server URI the
+// in-process transport accepts.
+func TestSeededCortexContextIsServedInProcess(t *testing.T) {
+	seeded := config.CortexContext()
+	c, err := NewClient(&seeded)
+	if err != nil {
+		t.Fatalf("NewClient on the seeded cortex context: %v", err)
+	}
+	client, ok := c.(*apiclient.Client)
+	if !ok {
+		t.Fatalf("got %T, want *apiclient.Client", c)
+	}
+	if client.HTTPClient == nil {
+		t.Error("seeded cortex context got a dialing client; it must be served in-process")
+	}
+}
+
 // TestNewClientIsAlwaysAPIClient verifies every context yields the one client
 // implementation, whatever its type field says.
 //

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -216,13 +217,80 @@ func TestEnsureContextSeedsFromDefault(t *testing.T) {
 		t.Errorf("seeded token = %q, want empty", cur.BearerToken)
 	}
 
-	// The seed must have been persisted.
+	// The seed must have been persisted: the default-server context and the
+	// cortex context that accompanies it.
 	reloaded, err := Load(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if len(reloaded.Contexts) != 1 {
-		t.Errorf("expected 1 persisted context, got %d", len(reloaded.Contexts))
+	if len(reloaded.Contexts) != 2 {
+		t.Errorf("expected 2 persisted contexts (default server + cortex), got %d", len(reloaded.Contexts))
+	}
+	if reloaded.CurrentContext != "seed-host" {
+		t.Errorf("current context = %q, want seed-host; seeding cortex must not change which is current",
+			reloaded.CurrentContext)
+	}
+}
+
+// TestEnsureContextSeedsCortexContext pins the fields of the accompanying cortex
+// context. Its name is what routes it to the in-process transport and the path of
+// its server URI is what the handler mounts at, so both are asserted exactly.
+func TestEnsureContextSeedsCortexContext(t *testing.T) {
+	path := tmpConfigPath(t)
+	cfg, err := EnsureContext(path, "http://seed-host:8080/api/v1/")
+	if err != nil {
+		t.Fatalf("EnsureContext: %v", err)
+	}
+
+	cortex, ok := cfg.Get(CortexContextName)
+	if !ok {
+		t.Fatalf("EnsureContext did not seed a %q context: %+v", CortexContextName, cfg.Contexts)
+	}
+	if cortex.Type != TypeCortex {
+		t.Errorf("cortex context type = %q, want %q", cortex.Type, TypeCortex)
+	}
+	if cortex.Server != DefaultCortexServer {
+		t.Errorf("cortex context server = %q, want %q", cortex.Server, DefaultCortexServer)
+	}
+	// Seeded blank: the namespace is filled in from local instance records, and
+	// the in-process handler ignores credentials, so there is no token to store.
+	if cortex.Namespace != "" {
+		t.Errorf("cortex namespace = %q, want empty", cortex.Namespace)
+	}
+	if cortex.BearerToken != "" {
+		t.Errorf("cortex token = %q, want empty", cortex.BearerToken)
+	}
+
+	// The seeded default-server context, not cortex, stays current.
+	if cfg.CurrentContext == CortexContextName {
+		t.Error("cortex must not become the current context on seeding")
+	}
+}
+
+// TestDefaultCortexServerHasMountPath pins the property inprocess.mountPath
+// depends on: the URI's path is the API mount point. A "tidied" constant that
+// dropped the path would leave the handler mounted at / and 404 every request,
+// which no other test in this package would catch.
+func TestDefaultCortexServerHasMountPath(t *testing.T) {
+	u, err := url.Parse(DefaultCortexServer)
+	if err != nil {
+		t.Fatalf("DefaultCortexServer does not parse: %v", err)
+	}
+	if u.Path != "/api/v1/" {
+		t.Errorf("DefaultCortexServer path = %q, want /api/v1/", u.Path)
+	}
+	if u.Host == "" {
+		t.Error("DefaultCortexServer has no host; apiclient needs one to build URLs")
+	}
+}
+
+// TestCortexContextMatchesConstants guards against CortexContext() drifting from
+// the constants callers compare against.
+func TestCortexContextMatchesConstants(t *testing.T) {
+	got := CortexContext()
+	want := Context{Name: CortexContextName, Type: TypeCortex, Server: DefaultCortexServer}
+	if got != want {
+		t.Errorf("CortexContext() = %+v, want %+v", got, want)
 	}
 }
 
@@ -256,5 +324,10 @@ func TestEnsureContextLeavesExistingAlone(t *testing.T) {
 	}
 	if len(cfg.Contexts) != 1 || cfg.CurrentContext != "mine" {
 		t.Errorf("EnsureContext altered existing config: %+v", cfg)
+	}
+	// Specifically: a config that already has contexts gains no cortex context.
+	// Seeding one on every load would resurrect a context the user deleted.
+	if _, ok := cfg.Get(CortexContextName); ok {
+		t.Error("EnsureContext seeded a cortex context into a non-empty config")
 	}
 }

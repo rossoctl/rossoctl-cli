@@ -40,6 +40,37 @@ const (
 	TypeCortex Type = "cortex"
 )
 
+// CortexContextName is the name of the context answered by an in-process cortex.
+//
+// It must equal rossoctlclient.CortexContextName, which is what actually routes
+// on the name. The constant is duplicated rather than imported because
+// rossoctlclient imports this package, so importing it back would invert the
+// dependency; a test asserts the two agree, since nothing else would notice them
+// drifting apart.
+const CortexContextName = "cortex"
+
+// DefaultCortexServer is the server URI given to a seeded cortex context.
+//
+// Only the path is load-bearing: it sets the API mount point the in-process
+// handler answers at, so dropping it would 404 every request. Host and port are
+// ignored because nothing is dialed. The value matches both the example in
+// `cortex --help` and the default address of `cortex serve`, so a context seeded
+// here also works if that daemon is later started.
+const DefaultCortexServer = "http://localhost:9097/api/v1/"
+
+// CortexContext returns the cortex context as seeded: no namespace and no token.
+//
+// The namespace is left for the caller to fill in from the local instance
+// records, and a token is omitted because the in-process handler ignores
+// credentials entirely.
+func CortexContext() Context {
+	return Context{
+		Name:   CortexContextName,
+		Type:   TypeCortex,
+		Server: DefaultCortexServer,
+	}
+}
+
 // Context is a single named target: a type, a server URI, an optional default
 // namespace, and an optional bearer token.
 type Context struct {
@@ -225,11 +256,24 @@ func ContextNameForServer(server string) string {
 	return u.Host
 }
 
-// EnsureContext loads the config at path and, if it contains no contexts,
-// seeds one from defaultServer (named after the server's hostname, with the
-// full URI as its server and an empty bearer token), makes it current, and
-// saves. The resulting config is returned. This is the single place the lazy
-// create-if-missing behavior lives.
+// EnsureContext loads the config at path and, if it contains no contexts, seeds
+// two — one from defaultServer (named after the server's hostname, with the full
+// URI as its server and an empty bearer token) and the cortex context — makes
+// the defaultServer one current, and saves. The resulting config is returned.
+// This is the single place the lazy create-if-missing behavior lives.
+//
+// The cortex context is seeded alongside so a fresh install can reach a local
+// cortex with `config use-context cortex` (or `login --cortex`) without first
+// having to know the name is magic and the server URI's path is load-bearing.
+// It costs nothing until selected: it is inert config, and being answered
+// in-process means it never dials anything.
+//
+// The defaultServer context stays current, so seeding does not change where a
+// first command or a plain `login` goes.
+//
+// Only the wholly-empty config is seeded, never a config that has contexts. A
+// user who deletes the cortex context has decided something, and re-creating it
+// on the next load would overrule that.
 func EnsureContext(path, defaultServer string) (*Config, error) {
 	cfg, err := Load(path)
 	if err != nil {
@@ -238,6 +282,7 @@ func EnsureContext(path, defaultServer string) (*Config, error) {
 	if len(cfg.Contexts) == 0 {
 		name := ContextNameForServer(defaultServer)
 		cfg.Upsert(Context{Name: name, Type: TypeAPI, Server: defaultServer})
+		cfg.Upsert(CortexContext())
 		if err := cfg.SetCurrent(name); err != nil {
 			return nil, err
 		}
