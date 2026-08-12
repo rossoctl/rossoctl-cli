@@ -184,11 +184,16 @@ func TestAuthbridgeExecCommandPath(t *testing.T) {
 	}
 }
 
-// TestAuthbridgeCortexFlagRemoved verifies --cortex is gone from the authbridge
-// group. exec is configured by --config and never resolves a context, so the flag
-// did nothing; it is now removed rather than deprecated, and passing it is an
-// error rather than a silently ignored argument.
-func TestAuthbridgeCortexFlagRemoved(t *testing.T) {
+// TestCortexFlagRemovedFromGroups verifies --cortex is gone from both the
+// authbridge and cortex groups, leaving `login --cortex` the only one in the tree.
+//
+// Neither did anything. authbridge exec is configured by --config and never
+// resolves a context; the cortex group bound its flag to a variable no code ever
+// read. Both are removed rather than deprecated, so passing one is an error
+// rather than a silently ignored argument -- which is the failure mode worth
+// testing, since a flag that parses and is discarded looks exactly like a flag
+// that works.
+func TestCortexFlagRemovedFromGroups(t *testing.T) {
 	c, _, err := rootCmd.Find([]string{"authbridge"})
 	if err != nil {
 		t.Fatalf("authbridge not found: %v", err)
@@ -220,14 +225,18 @@ func TestAuthbridgeCortexFlagRemoved(t *testing.T) {
 		t.Errorf("the command should not have run: %v", err)
 	}
 
-	// --cortex must survive where it means something: the removal is scoped to
-	// the authbridge group, not to the flag itself.
+	// The cortex group's own --cortex is gone too, for the same reason: it was
+	// bound to a variable nothing ever read. That leaves `login --cortex` as the
+	// only --cortex in the tree, so a stray one anywhere else is a mistake.
 	cortex, _, err := rootCmd.Find([]string{"cortex"})
 	if err != nil {
 		t.Fatalf("cortex not found: %v", err)
 	}
-	if cortex.PersistentFlags().Lookup("cortex") == nil {
-		t.Error("the cortex group should still have --cortex")
+	if f := cortex.PersistentFlags().Lookup("cortex"); f != nil {
+		t.Error("the cortex group still has a --cortex persistent flag")
+	}
+	if f := cortexServeCmd.InheritedFlags().Lookup("cortex"); f != nil {
+		t.Error("cortex serve still inherits a --cortex flag")
 	}
 }
 

@@ -43,8 +43,7 @@ With --cortex, the local cortex context is made current and nothing else
 happens: no server is contacted and no token is stored, because a cortex context
 is answered by handlers inside this process, which ignore credentials. The
 context is created if it does not exist. Its namespace is taken from the local
-instance records, so it needs no network either. (Note that the cortex command
-group's --cortex is a different flag: there it names which cortex to operate on.)`,
+instance records, so it needs no network either.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		// Handled before anything else: this path shares none of the logic below.

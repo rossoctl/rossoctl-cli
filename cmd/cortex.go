@@ -1,12 +1,5 @@
 package cmd
 
-// cortexName is the name of the cortex to operate on, bound to the cortex
-// group's --cortex flag.
-var cortexName string
-
-// defaultCortexName is the cortex name used when --cortex is not given.
-const defaultCortexName = "default"
-
 func init() {
 	cortexCmd := newGroup("cortex", "Manage cortexes")
 
@@ -36,12 +29,7 @@ cannot cover — pointing a web UI, or anything else that is not rossoctl, at a
 local cortex.
 
 "rossoctl login --cortex" creates that context and makes it current without
-contacting a server. Note that its --cortex is a boolean, unlike this group's
---cortex, which names the cortex to operate on.`
-
-	// Persistent so every cortex subcommand inherits it.
-	cortexCmd.PersistentFlags().StringVar(&cortexName, "cortex", defaultCortexName,
-		"name of the cortex to operate on")
+contacting a server.`
 
 	cortexCmd.AddCommand(cortexServeCmd)
 	rootCmd.AddCommand(cortexCmd)

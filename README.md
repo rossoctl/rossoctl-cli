@@ -111,8 +111,7 @@ rossoctl login --server http://host:8080/api/v1/ --token <token>   # target the 
 # The "cortex" context is answered inside the command's own process, from the
 # records `authbridge exec` wrote, so it needs no server and no token. --cortex
 # makes it current without contacting anything; its namespace comes from those
-# local records. (The cortex command group's --cortex is a different flag: there
-# it names which cortex to operate on.)
+# local records.
 rossoctl login --cortex                         # switch to the local cortex; no network, no token
 
 # Inspect the bearer token stored on the context (decoded locally; nothing is sent)
