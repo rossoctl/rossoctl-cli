@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -471,6 +473,262 @@ func TestLoginServerBeatsContext(t *testing.T) {
 
 // TestLoginSuggestsAuthStatus pins the pointer to `auth status`: the token's
 // roles and audiences decide what now works, and login is when the user has them.
+// --- login --cortex ---
+
+// TestLoginCortexSelectsCortexContext covers the basic outcome: the cortex
+// context becomes current, carrying the seeded type and server, with no token.
+func TestLoginCortexSelectsCortexContext(t *testing.T) {
+	path := isolateHome(t)
+
+	out, err := execute(t, "login", "--cortex")
+	if err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cur, ok := cfg.Current()
+	if !ok {
+		t.Fatal("no current context after login --cortex")
+	}
+	if cur.Name != config.CortexContextName {
+		t.Errorf("current context = %q, want %q", cur.Name, config.CortexContextName)
+	}
+	if cur.Type != config.TypeCortex {
+		t.Errorf("cortex context type = %q, want %q", cur.Type, config.TypeCortex)
+	}
+	if cur.Server != config.DefaultCortexServer {
+		t.Errorf("cortex context server = %q, want %q", cur.Server, config.DefaultCortexServer)
+	}
+	// A cortex context is answered in-process and credentials are ignored, so
+	// login must not invent a token for it.
+	if cur.BearerToken != "" {
+		t.Errorf("token = %q, want empty: the local cortex needs none", cur.BearerToken)
+	}
+}
+
+// TestLoginCortexMakesNoNetworkCall is the test that pins "without trying to
+// contact a remote api server".
+//
+// The current context points at a server whose handler fails the test on any
+// request at all, so a login that reached for /auth/config, ran a device flow, or
+// listed namespaces remotely would be caught whichever of the three it tried.
+// Every other test in this group would pass against an implementation that
+// quietly dialed.
+func TestLoginCortexMakesNoNetworkCall(t *testing.T) {
+	isolateHome(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("login --cortex contacted the server: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Make that server the current context, so a login that consults the current
+	// context's server hits the failing handler.
+	if _, err := execute(t, "config", "create-context",
+		"--name", "dev", "--server", srv.URL+"/api/v1/"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	if out, err := execute(t, "login", "--cortex"); err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+}
+
+// TestLoginCortexCreatesContextWhenAbsent covers the config that predates cortex
+// seeding: contexts exist, but none is named cortex.
+func TestLoginCortexCreatesContextWhenAbsent(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "dev", "--server", "http://dev/api/v1/", "--namespace", "team1"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	if out, err := execute(t, "login", "--cortex"); err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := cfg.Get(config.CortexContextName); !ok {
+		t.Fatalf("login --cortex did not create the context: %+v", cfg.Contexts)
+	}
+	if cfg.CurrentContext != config.CortexContextName {
+		t.Errorf("current context = %q, want %q", cfg.CurrentContext, config.CortexContextName)
+	}
+	// The pre-existing context must survive untouched.
+	if dev, ok := cfg.Get("dev"); !ok || dev.Namespace != "team1" {
+		t.Errorf("pre-existing context was disturbed: %+v", cfg.Contexts)
+	}
+}
+
+// TestLoginCortexReusesExistingContext verifies an existing cortex context is
+// selected rather than replaced. Catches an unconditional Upsert, which would
+// silently discard a namespace or token the user had set.
+func TestLoginCortexReusesExistingContext(t *testing.T) {
+	path := isolateHome(t)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cfg.Upsert(config.Context{
+		Name:        config.CortexContextName,
+		Type:        config.TypeCortex,
+		Server:      "http://localhost:9999/custom/",
+		Namespace:   "mine",
+		BearerToken: "keepme",
+	})
+	cfg.Upsert(config.Context{Name: "dev", Server: "http://dev/api/v1/"})
+	if err := cfg.SetCurrent("dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := execute(t, "login", "--cortex"); err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	cur, ok := reloaded.Current()
+	if !ok || cur.Name != config.CortexContextName {
+		t.Fatalf("current context = %+v, want cortex", cur)
+	}
+	if cur.Server != "http://localhost:9999/custom/" {
+		t.Errorf("server = %q, want the user's own value preserved", cur.Server)
+	}
+	if cur.Namespace != "mine" {
+		t.Errorf("namespace = %q, want mine preserved", cur.Namespace)
+	}
+	if cur.BearerToken != "keepme" {
+		t.Errorf("token = %q, want keepme preserved", cur.BearerToken)
+	}
+}
+
+// TestLoginCortexPicksUpLocalNamespace verifies the namespace is taken from the
+// local instance records through the in-process transport — no network involved.
+//
+// instances resolves its directory from the same $HOME that isolateHome sets, so
+// creating the namespace directory is the whole fixture.
+func TestLoginCortexPicksUpLocalNamespace(t *testing.T) {
+	path := isolateHome(t)
+
+	// path is <home>/.config/rossoctl/config.yaml, and the instance records live
+	// under <home>/.config/rossoctl/namespaces, so this is a sibling of the config
+	// file.
+	nsDir := filepath.Join(filepath.Dir(path), "namespaces", "team7")
+	if err := os.MkdirAll(nsDir, 0o700); err != nil {
+		t.Fatalf("creating namespace dir: %v", err)
+	}
+
+	out, err := execute(t, "login", "--cortex")
+	if err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cur, _ := cfg.Current()
+	if cur.Namespace != "team7" {
+		t.Errorf("namespace = %q, want team7 from the local instance records", cur.Namespace)
+	}
+	if !strings.Contains(out, "team7") {
+		t.Errorf("output should name the namespace:\n%s", out)
+	}
+}
+
+// TestLoginCortexBlankNamespaceIsReported is the complement: with no local
+// records the namespace stays blank, and the output says so rather than implying
+// the context is ready to use.
+func TestLoginCortexBlankNamespaceIsReported(t *testing.T) {
+	path := isolateHome(t)
+
+	out, err := execute(t, "login", "--cortex")
+	if err != nil {
+		t.Fatalf("login --cortex: %v\n%s", err, out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cur, _ := cfg.Current()
+	if cur.Namespace != "" {
+		t.Errorf("namespace = %q, want empty with no local records", cur.Namespace)
+	}
+	if !strings.Contains(out, "No local namespaces found") {
+		t.Errorf("output should report the blank namespace:\n%s", out)
+	}
+}
+
+// TestLoginCortexRejectsConflictingFlags verifies each contradictory combination
+// errors and names the offending flag, rather than silently picking a precedence.
+func TestLoginCortexRejectsConflictingFlags(t *testing.T) {
+	for _, c := range []struct{ flag, value string }{
+		{"token", "sekret"},
+		{"server", "http://elsewhere/api/v1/"},
+		{"context", "dev"},
+	} {
+		t.Run(c.flag, func(t *testing.T) {
+			isolateHome(t)
+			out, err := execute(t, "login", "--cortex", "--"+c.flag, c.value)
+			if err == nil {
+				t.Fatalf("login --cortex --%s should have failed:\n%s", c.flag, out)
+			}
+			if !strings.Contains(err.Error(), "--"+c.flag) {
+				t.Errorf("error should name --%s: %v", c.flag, err)
+			}
+		})
+	}
+}
+
+// TestLoginSeedsCortexContextToo is the regression guard for the seeding half of
+// this change: a plain login on an empty config gains a cortex context, while the
+// API context stays current and receives the token.
+func TestLoginSeedsCortexContextToo(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "login", "--token", "tok"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := cfg.Get(config.CortexContextName); !ok {
+		t.Errorf("login did not seed a cortex context: %+v", cfg.Contexts)
+	}
+	// The regular work must be unchanged: the API context is current and holds
+	// the token, and the cortex context holds none.
+	cur, ok := cfg.Current()
+	if !ok {
+		t.Fatal("no current context")
+	}
+	if cur.Name != "rossoctl-ui.localtest.me" {
+		t.Errorf("current context = %q, want the default-server context to stay current", cur.Name)
+	}
+	if cur.BearerToken != "tok" {
+		t.Errorf("token = %q, want tok on the API context", cur.BearerToken)
+	}
+	if cortex, ok := cfg.Get(config.CortexContextName); ok && cortex.BearerToken != "" {
+		t.Errorf("cortex token = %q, want empty", cortex.BearerToken)
+	}
+}
+
 func TestLoginSuggestsAuthStatus(t *testing.T) {
 	isolateHome(t)
 	if _, err := execute(t, "config", "create-context",

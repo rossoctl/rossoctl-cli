@@ -95,7 +95,10 @@ rossoctl agents --help
 rossoctl install
 
 # Manage contexts (persisted in ~/.config/rossoctl/config.yaml, kubectl-style)
-rossoctl config get-contexts                    # created + seeded on first use
+# get-contexts never creates anything, so it prints an empty table until some
+# other command seeds the config. Seeding creates two contexts: one for the
+# default API server, which becomes current, and a local "cortex" one.
+rossoctl config get-contexts
 rossoctl config create-context --name dev \
     --server http://my-host:8080/api/v1/ --namespace team1 --bearer-token <token>   # becomes current
 rossoctl config use-context dev
@@ -105,6 +108,12 @@ rossoctl config set-context --name prod          # rename the current context (u
 rossoctl login --token <token>                  # set the token on the current context directly
 rossoctl login                                  # or: OAuth device flow against the server's Keycloak
 rossoctl login --server http://host:8080/api/v1/ --token <token>   # target the context for that host (create if absent), make it current
+# The "cortex" context is answered inside the command's own process, from the
+# records `authbridge exec` wrote, so it needs no server and no token. --cortex
+# makes it current without contacting anything; its namespace comes from those
+# local records. (The cortex command group's --cortex is a different flag: there
+# it names which cortex to operate on.)
+rossoctl login --cortex                         # switch to the local cortex; no network, no token
 
 # Inspect the bearer token stored on the context (decoded locally; nothing is sent)
 rossoctl auth status                            # name/username/email, issuer, expiry, audiences, roles, scopes

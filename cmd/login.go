@@ -14,7 +14,12 @@ import (
 	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
 )
 
-var loginToken string
+var (
+	loginToken string
+
+	// loginCortex backs --cortex: select the local cortex context, offline.
+	loginCortex bool
+)
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
@@ -32,9 +37,23 @@ With --token, the given token is stored directly. Without --token, an OAuth 2.0
 device authorization flow is run against the server's Keycloak: rossoctl reads
 the Keycloak URL, realm, and client id from GET <server>/auth/config, shows a
 verification URL and one-time code (and attempts to open a browser), then polls
-until you authorize.`,
+until you authorize.
+
+With --cortex, the local cortex context is made current and nothing else
+happens: no server is contacted and no token is stored, because a cortex context
+is answered by handlers inside this process, which ignore credentials. The
+context is created if it does not exist. Its namespace is taken from the local
+instance records, so it needs no network either. (Note that the cortex command
+group's --cortex is a different flag: there it names which cortex to operate on.)`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		// Handled before anything else: this path shares none of the logic below.
+		// It has no token to obtain, no auth config to read, and no server to pick
+		// a context for.
+		if loginCortex {
+			return loginCortexContext(cmd)
+		}
+
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -135,6 +154,80 @@ until you authorize.`,
 		cmd.Println("Run `rossoctl auth status` to see the privileges this token carries.")
 		return nil
 	},
+}
+
+// loginCortexContext makes the cortex context current without any network I/O,
+// creating it if absent.
+//
+// There is no token to obtain: a cortex context is answered by a serve handler
+// inside this process, which ignores credentials entirely. So none of the three
+// network calls the token path makes — GET /auth/config, the device flow, and the
+// namespace listing against a remote server — happens here.
+//
+// The context is created when missing rather than reported as an error, so the
+// flag also works on a config that predates cortex seeding; without that it would
+// fail exactly where it is most useful.
+func loginCortexContext(cmd *cobra.Command) error {
+	if err := rejectFlagsWithCortex(cmd); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	target, ok := cfg.Get(config.CortexContextName)
+	if !ok {
+		cfg.Upsert(config.CortexContext())
+		target, _ = cfg.Get(config.CortexContextName)
+	}
+	if err := cfg.SetCurrent(target.Name); err != nil {
+		return err
+	}
+
+	// Reuses the token path's helper, which needs no adjustment: it builds its
+	// client from the target context, and a context named "cortex" is routed to
+	// the in-process transport, which reads the local instance records. Nothing is
+	// dialed. Best-effort for the same reason as there — a machine where nothing
+	// has run yet simply has no namespace to offer.
+	if target.Namespace == "" {
+		if ns := firstNamespace(cmd, target); ns != "" {
+			target.Namespace = ns
+		}
+	}
+
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+
+	if target.Namespace != "" {
+		cmd.Printf("Switched to context %q (namespace %q); no token needed.\n", target.Name, target.Namespace)
+		return nil
+	}
+	// Stated rather than passed over silently: this is the one outcome where the
+	// switch succeeded but resource commands will still fail, since a context with
+	// no namespace is rejected before any request is built.
+	cmd.Printf("Switched to context %q; no token needed.\n", target.Name)
+	cmd.Println("No local namespaces found yet. Run `rossoctl authbridge exec` to create one,")
+	cmd.Println("or set one with `rossoctl config set-context --namespace <name>`.")
+	return nil
+}
+
+// rejectFlagsWithCortex reports flags that contradict --cortex.
+//
+// Each of these asks for something --cortex rules out: a token the local cortex
+// would ignore, or a server to reach when the point of the flag is to reach none.
+// Rejecting the combination is better than a silent precedence rule, which would
+// have to be guessed from the help text, and it is easier to relax later than a
+// documented precedence is to change.
+func rejectFlagsWithCortex(cmd *cobra.Command) error {
+	for _, name := range []string{"token", "server", "context"} {
+		if cmd.Flags().Changed(name) {
+			return fmt.Errorf("--cortex cannot be combined with --%s: the local cortex is answered in this process, so there is no server to contact and no credential to send", name)
+		}
+	}
+	return nil
 }
 
 // firstNamespace returns the first namespace the target context's server
@@ -255,5 +348,7 @@ func openBrowser(url string) error {
 
 func init() {
 	loginCmd.Flags().StringVar(&loginToken, "token", "", "bearer token to store on the current context; if omitted, run the device login flow")
+	loginCmd.Flags().BoolVar(&loginCortex, "cortex", false,
+		"make the local cortex context current without contacting a server (no token is needed)")
 	rootCmd.AddCommand(loginCmd)
 }

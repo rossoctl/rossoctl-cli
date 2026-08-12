@@ -33,7 +33,11 @@ a remote machine is answered locally rather than there. Run any command with
 
 "cortex serve" starts a real HTTP server for the cases this in-process path
 cannot cover — pointing a web UI, or anything else that is not rossoctl, at a
-local cortex.`
+local cortex.
+
+"rossoctl login --cortex" creates that context and makes it current without
+contacting a server. Note that its --cortex is a boolean, unlike this group's
+--cortex, which names the cortex to operate on.`
 
 	// Persistent so every cortex subcommand inherits it.
 	cortexCmd.PersistentFlags().StringVar(&cortexName, "cortex", defaultCortexName,

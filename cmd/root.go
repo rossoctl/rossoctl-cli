@@ -120,12 +120,20 @@ func resolveServer() (serverURI, token string, err error) {
 // currentNamespace returns the namespace of the effective context (see
 // resolveContext). It returns an error if that context has no namespace set,
 // since callers that need a namespace cannot proceed without one.
+//
+// The remedy named depends on the context: signing in is what fills a namespace
+// in for a server-backed context, but a cortex context has no sign-in at all —
+// its namespaces are the local instance records — so pointing there would send
+// the user in a circle.
 func currentNamespace() (string, error) {
 	ctx, err := resolveContext()
 	if err != nil {
 		return "", err
 	}
 	if ctx.Namespace == "" {
+		if ctx.Name == config.CortexContextName {
+			return "", fmt.Errorf("context %q has no namespace set; run `rossoctl authbridge exec` to create one locally, or set it with `rossoctl config set-context --namespace <name>`", ctx.Name)
+		}
 		return "", fmt.Errorf("context %q has no namespace set; run `rossoctl login` to sign in and select one", ctx.Name)
 	}
 	return ctx.Namespace, nil
