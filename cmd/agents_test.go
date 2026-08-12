@@ -176,6 +176,76 @@ func TestAgentsListSingleNamespaceFromFlag(t *testing.T) {
 	}
 }
 
+// TestAgentsListNoHeaders mirrors TestToolsListNoHeaders. The two print
+// functions are separate copies of the same code, so each needs its own guard --
+// a change applied to one and not the other is exactly what this catches.
+func TestAgentsListNoHeaders(t *testing.T) {
+	srv, _ := newAgentsServer(t, agentsBody)
+
+	out, err := execute(t, "--server", srv.URL+"/api/v1/",
+		"agents", "--namespace", "team1", "list", "--no-headers")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, unwanted := range []string{"NAME", "NAMESPACE", "STATUS", "WORKLOAD", "PROTOCOL", "DESCRIPTION"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("--no-headers output still contains the header %q:\n%s", unwanted, out)
+		}
+	}
+	for _, want := range []string{"orders-agent", "weather", "team1", "Ready", "a2a"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--no-headers output missing data %q:\n%s", want, out)
+		}
+	}
+
+	// The first field of each line is what `awk '{print $1}'` would take.
+	var names []string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		names = append(names, strings.Fields(line)[0])
+	}
+	if len(names) != 2 || names[0] != "orders-agent" || names[1] != "weather" {
+		t.Errorf("first fields = %v, want [orders-agent weather] with no header row", names)
+	}
+}
+
+// TestAgentsListNoHeadersEmptyStdoutIsBlank mirrors the tools case: stdout must
+// be empty when there is nothing to list, so a pipeline does not receive the word
+// "No" as an argument.
+func TestAgentsListNoHeadersEmptyStdoutIsBlank(t *testing.T) {
+	srv, _ := newAgentsServer(t, `{"items": []}`)
+
+	stdout, stderr, err := executeSplit(t, "--server", srv.URL+"/api/v1/",
+		"agents", "--namespace", "team1", "list", "--no-headers")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("stdout = %q, want empty so a pipeline sees no rows", stdout)
+	}
+	if !strings.Contains(stderr, "No agents found") {
+		t.Errorf("stderr = %q, want the notice reported there", stderr)
+	}
+}
+
+// TestAgentsListEmptyNoticeOnStdoutByDefault pins the unflagged behavior, so the
+// pipeline fix cannot be made by moving the notice unconditionally.
+func TestAgentsListEmptyNoticeOnStdoutByDefault(t *testing.T) {
+	srv, _ := newAgentsServer(t, `{"items": []}`)
+
+	stdout, _, err := executeSplit(t, "--server", srv.URL+"/api/v1/",
+		"agents", "--namespace", "team1", "list")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "No agents found") {
+		t.Errorf("stdout = %q, want the notice on stdout without --no-headers", stdout)
+	}
+}
+
 func TestAgentsListRequiresNamespaceWithoutAllFlag(t *testing.T) {
 	// No --all-namespaces and no --namespace/context namespace -> error.
 	isolateHome(t)

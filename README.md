@@ -134,6 +134,10 @@ rossoctl agents list                            # single namespace: agents --nam
 rossoctl agents --namespace team2 list          # list one specific namespace
 rossoctl agents list --all-namespaces           # -A: discover via GET /namespaces, list across all
 rossoctl agents list --all-namespaces --json    # each namespace's response, separated by ---
+rossoctl agents list --no-headers               # omit the header row, for piping to other tools
+# With --no-headers the "no agents found" notice goes to stderr instead, so
+# stdout is empty when there is nothing to list and a pipeline sees no rows:
+rossoctl agents list --no-headers | awk '{print $1}' | xargs -n1 rossoctl agents delete
 
 # Show one agent (GET <server>/agents/<namespace>/<name>)
 rossoctl agents get orders                      # single-column text, laid out like the web detail page
@@ -163,9 +167,11 @@ rossoctl agents --context prod get orders               # equivalent
 rossoctl --context prod agents --namespace teamX list   # --namespace still overrides the context's namespace
 
 # Tools mirror the agents commands, against the /tools endpoint.
-# --namespace, --context, --all-namespaces (-A), and --json behave as for agents.
+# --namespace, --context, --all-namespaces (-A), --json, and --no-headers behave
+# as for agents.
 rossoctl tools list                              # single namespace (context, or --namespace)
 rossoctl tools list --all-namespaces             # discover and list across all
+rossoctl tools list --no-headers | awk '{print $1}' | xargs -n1 rossoctl tools delete
 rossoctl tools --namespace team2 list --json
 rossoctl tools get weather-mcp                   # GET /tools/<namespace>/weather-mcp (single-column detail)
 rossoctl tools get weather-mcp --json            # raw JSON response

@@ -15,6 +15,7 @@ import (
 var (
 	agentsListJSON          bool
 	agentsListAllNamespaces bool
+	agentsListNoHeaders     bool
 
 	// agentsNamespaceFlag backs the persistent --namespace flag on the agents
 	// group. When set it overrides the effective context's namespace for the
@@ -44,7 +45,16 @@ are listed across all of them, with a separate request per namespace.
 
 The combined agents are printed as a single human-readable table with a
 NAMESPACE column. With --json each namespace's raw response is printed
-unchanged, separated by a line containing "---".`,
+unchanged, separated by a line containing "---".
+
+With --no-headers the column header row is omitted, so the output can be fed to
+other tools:
+
+  rossoctl agents list --no-headers | awk '{print $1}' | xargs -n1 rossoctl agents delete
+
+--no-headers also moves the "no agents found" notice to stderr, leaving stdout
+empty when there is nothing to list, so a pipeline sees no rows rather than a
+sentence. It has no effect with --json, which prints no headers to begin with.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		client, err := newClient(cmd)
@@ -111,10 +121,17 @@ func printAgentsJSON(cmd *cobra.Command, responses []*apiclient.AgentListRespons
 	return nil
 }
 
+// printAgentsTable prints agents as a table, with a header row unless
+// --no-headers was given. See printToolsTable for why the empty-result notice
+// changes stream with the flag.
 func printAgentsTable(cmd *cobra.Command, agents []apiclient.AgentSummary) {
 	out := cmd.OutOrStdout()
 
 	if len(agents) == 0 {
+		if agentsListNoHeaders {
+			fmt.Fprintln(cmd.ErrOrStderr(), "No agents found.")
+			return
+		}
 		fmt.Fprintln(out, "No agents found.")
 		return
 	}
@@ -128,7 +145,9 @@ func printAgentsTable(cmd *cobra.Command, agents []apiclient.AgentSummary) {
 	})
 
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tNAMESPACE\tSTATUS\tWORKLOAD\tPROTOCOL\tDESCRIPTION")
+	if !agentsListNoHeaders {
+		fmt.Fprintln(w, "NAME\tNAMESPACE\tSTATUS\tWORKLOAD\tPROTOCOL\tDESCRIPTION")
+	}
 	for _, a := range agents {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			a.Name,
@@ -170,6 +189,7 @@ func init() {
 
 	agentsListCmd.Flags().BoolVar(&agentsListJSON, "json", false, "print the raw JSON response unchanged")
 	agentsListCmd.Flags().BoolVarP(&agentsListAllNamespaces, "all-namespaces", "A", false, "list agents across all namespaces discovered from the server")
+	agentsListCmd.Flags().BoolVar(&agentsListNoHeaders, "no-headers", false, "omit the column header row, so the output can be piped to other tools")
 
 	agentsCardCmd.Flags().BoolVar(&agentsCardJSON, "json", false, "print the raw JSON response unchanged")
 

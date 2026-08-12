@@ -15,6 +15,7 @@ import (
 var (
 	toolsListJSON          bool
 	toolsListAllNamespaces bool
+	toolsListNoHeaders     bool
 
 	// toolsNamespaceFlag backs the persistent --namespace flag on the tools
 	// group. When set it overrides the effective context's namespace for the
@@ -44,7 +45,16 @@ are listed across all of them, with a separate request per namespace.
 
 The combined tools are printed as a single human-readable table with a
 NAMESPACE column. With --json each namespace's raw response is printed
-unchanged, separated by a line containing "---".`,
+unchanged, separated by a line containing "---".
+
+With --no-headers the column header row is omitted, so the output can be fed to
+other tools:
+
+  rossoctl tools list --no-headers | awk '{print $1}' | xargs -n1 rossoctl tools delete
+
+--no-headers also moves the "no tools found" notice to stderr, leaving stdout
+empty when there is nothing to list, so a pipeline sees no rows rather than a
+sentence. It has no effect with --json, which prints no headers to begin with.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		client, err := newClient(cmd)
@@ -111,10 +121,24 @@ func printToolsJSON(cmd *cobra.Command, responses []*apiclient.ToolListResponse)
 	return nil
 }
 
+// printToolsTable prints tools as a table, with a header row unless
+// --no-headers was given.
+//
+// The empty-result notice goes to stderr under --no-headers and to stdout
+// otherwise. The flag exists so the output can be piped, and a pipeline reading
+// "No tools found." gets the word "No" as its first argument; stdout has to be
+// empty when there are no rows. Interactively there is no pipe to protect, and
+// moving the line unconditionally would hide it from anyone redirecting stdout to
+// a file, so the two cases differ. This mirrors kubectl, which likewise reports
+// "No resources found" on stderr.
 func printToolsTable(cmd *cobra.Command, tools []apiclient.ToolSummary) {
 	out := cmd.OutOrStdout()
 
 	if len(tools) == 0 {
+		if toolsListNoHeaders {
+			fmt.Fprintln(cmd.ErrOrStderr(), "No tools found.")
+			return
+		}
 		fmt.Fprintln(out, "No tools found.")
 		return
 	}
@@ -128,7 +152,9 @@ func printToolsTable(cmd *cobra.Command, tools []apiclient.ToolSummary) {
 	})
 
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tNAMESPACE\tSTATUS\tWORKLOAD\tPROTOCOL\tDESCRIPTION")
+	if !toolsListNoHeaders {
+		fmt.Fprintln(w, "NAME\tNAMESPACE\tSTATUS\tWORKLOAD\tPROTOCOL\tDESCRIPTION")
+	}
 	for _, tl := range tools {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			tl.Name,
@@ -152,6 +178,7 @@ func init() {
 
 	toolsListCmd.Flags().BoolVar(&toolsListJSON, "json", false, "print the raw JSON response unchanged")
 	toolsListCmd.Flags().BoolVarP(&toolsListAllNamespaces, "all-namespaces", "A", false, "list tools across all namespaces discovered from the server")
+	toolsListCmd.Flags().BoolVar(&toolsListNoHeaders, "no-headers", false, "omit the column header row, so the output can be piped to other tools")
 
 	toolsCmd.AddCommand(
 		toolsListCmd,
