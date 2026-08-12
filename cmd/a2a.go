@@ -272,6 +272,7 @@ func streamA2AMessage(cmd *cobra.Command, opts a2aSendOptions) error {
 	}
 
 	out := cmd.OutOrStdout()
+	eventCount := 0
 	for event, err := range client.SendStreamingMessage(ctx, req) {
 		// The iterator reports a failed call by yielding an error; stop at
 		// the first one rather than continuing to print, since the stream
@@ -286,7 +287,11 @@ func streamA2AMessage(cmd *cobra.Command, opts a2aSendOptions) error {
 			}
 			return err
 		}
+		eventCount++
 		printA2AEvent(out, event)
+	}
+	if eventCount == 0 {
+		return fmt.Errorf("agent returned no A2A events")
 	}
 	return nil
 }

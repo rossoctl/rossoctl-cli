@@ -141,6 +141,19 @@ func TestA2ASendDefaultsToJSONRPC(t *testing.T) {
 	}
 }
 
+func TestA2ASendRejectsEmptyErrorStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","error":{"code":-32601,"message":"Method not found"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := execute(t, "a2a", "send", "--address", srv.URL, "--message", "hello")
+	if err == nil || !strings.Contains(err.Error(), "no A2A events") {
+		t.Fatalf("error = %v, want empty-stream error", err)
+	}
+}
+
 func TestA2ASendRequiredFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name string
