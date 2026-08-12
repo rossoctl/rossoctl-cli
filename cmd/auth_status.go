@@ -165,6 +165,6 @@ server's authentication settings, use ` + "`rossoctl auth-config`" + `.`
 	authStatusCmd.Flags().BoolVar(&authStatusJSON, "json", false,
 		"print the decoded claims as JSON instead of human-formatted text")
 
-	authCmd.AddCommand(authStatusCmd)
+	authCmd.AddCommand(authStatusCmd, authTokenCmd)
 	rootCmd.AddCommand(authCmd)
 }

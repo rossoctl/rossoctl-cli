@@ -119,6 +119,14 @@ rossoctl auth status                            # name/username/email, issuer, e
 rossoctl auth status --json                     # the decoded claims as JSON
 rossoctl auth status --context prod             # inspect another context's token
 
+# Print the raw bearer token, and nothing else, for use in another command.
+# Note this writes a credential to stdout: a terminal keeps it in scrollback and
+# CI keeps it in the build log. Exits non-zero when the context holds no token,
+# so the substitution fails rather than expanding to an empty string.
+rossoctl auth token
+curl -H "Authorization: Bearer $(rossoctl auth token)" http://my-host:8080/api/v1/agents?namespace=team1
+rossoctl auth token --context prod              # the token from another context
+
 # Show the server's auth configuration (GET <server>/auth/config)
 rossoctl auth-config
 rossoctl auth-config --json
