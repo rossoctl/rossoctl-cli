@@ -13,8 +13,23 @@ import (
 
 var agentsAuthbridgeJSON bool
 
-var agentsAuthbridgeCmd = &cobra.Command{
-	Use:   "authbridge <name>",
+// newAgentsAuthbridgeCmd builds the `agents authbridge` group. It holds only
+// `get` today; the group exists so that reading an agent's AuthBridge
+// configuration and the operations that will act on it are siblings under one
+// noun, rather than the read being the whole of `agents authbridge` and every
+// later addition having to displace it.
+func newAgentsAuthbridgeCmd() *cobra.Command {
+	authbridgeCmd := newGroup("authbridge", "Inspect an agent's AuthBridge configuration")
+
+	agentsAuthbridgeGetCmd.Flags().BoolVar(&agentsAuthbridgeJSON, "json", false,
+		"print the raw JSON response unchanged")
+
+	authbridgeCmd.AddCommand(agentsAuthbridgeGetCmd)
+	return authbridgeCmd
+}
+
+var agentsAuthbridgeGetCmd = &cobra.Command{
+	Use:   "get <name>",
 	Short: "Show an agent's AuthBridge identity configuration",
 	Long: `Show the AuthBridge configuration for an agent
 (GET <server>/agents/<namespace>/<name>/identity-config), where namespace is the

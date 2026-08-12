@@ -193,8 +193,6 @@ func init() {
 
 	agentsCardCmd.Flags().BoolVar(&agentsCardJSON, "json", false, "print the raw JSON response unchanged")
 
-	agentsAuthbridgeCmd.Flags().BoolVar(&agentsAuthbridgeJSON, "json", false, "print the raw JSON response unchanged")
-
 	chatFlags := agentsChatCmd.Flags()
 	chatFlags.StringVar(&agentsChatArgs.address, "address", "",
 		"URL of the A2A agent (default: the URL from the agent's card)")
@@ -205,7 +203,7 @@ func init() {
 		"attach the context's bearer token as an Authorization header")
 
 	agentsCmd.AddCommand(
-		agentsAuthbridgeCmd,
+		newAgentsAuthbridgeCmd(),
 		agentsCardCmd,
 		agentsChatCmd,
 		agentsDeleteCmd,

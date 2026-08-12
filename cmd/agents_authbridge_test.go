@@ -72,9 +72,9 @@ func TestAgentsAuthbridgeText(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v\noutput:\n%s", err, out)
+		t.Fatalf("agents authbridge get: %v\noutput:\n%s", err, out)
 	}
 
 	for _, want := range []string{
@@ -105,9 +105,9 @@ func TestAgentsAuthbridgeStageOrdering(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 
 	inbound := strings.Index(out, "Inbound Plugins")
@@ -138,9 +138,9 @@ func TestAgentsAuthbridgeExecutionOrder(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 
 	for _, want := range []string{"1. jwt-validation", "2. opa", "3. ibac"} {
@@ -161,9 +161,9 @@ func TestAgentsAuthbridgeReportsOnErrorPolicy(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 
 	// An explicitly disabled plugin and a shadow-mode one.
@@ -186,9 +186,9 @@ func TestAgentsAuthbridgeIDReported(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 	if !strings.Contains(out, "opa-main") {
 		t.Errorf("output missing the plugin id:\n%s", out)
@@ -203,9 +203,9 @@ func TestAgentsAuthbridgeJSON(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders", "--json")
+	out, err := execute(t, "agents", "authbridge", "get", "orders", "--json")
 	if err != nil {
-		t.Fatalf("agents authbridge --json: %v\noutput:\n%s", err, out)
+		t.Fatalf("agents authbridge get --json: %v\noutput:\n%s", err, out)
 	}
 
 	// It must be valid JSON, not the text rendering.
@@ -255,9 +255,9 @@ func TestAgentsAuthbridgeJSONNotText(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders", "--json")
+	out, err := execute(t, "agents", "authbridge", "get", "orders", "--json")
 	if err != nil {
-		t.Fatalf("agents authbridge --json: %v", err)
+		t.Fatalf("agents authbridge get --json: %v", err)
 	}
 	if strings.Contains(out, "Inbound Plugins") {
 		t.Errorf("--json should not print the text headings:\n%s", out)
@@ -284,7 +284,7 @@ func TestAgentsAuthbridgeBarePluginName(t *testing.T) {
 	srv := newIdentityConfigServer(t, body, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
 		t.Fatalf("a bare plugin name should be accepted: %v\noutput:\n%s", err, out)
 	}
@@ -308,9 +308,9 @@ func TestAgentsAuthbridgeEmptyPipeline(t *testing.T) {
 	srv := newIdentityConfigServer(t, body, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v\noutput:\n%s", err, out)
+		t.Fatalf("agents authbridge get: %v\noutput:\n%s", err, out)
 	}
 	for _, want := range []string{"Inbound Plugins", "Outbound Plugins", "(none)"} {
 		if !strings.Contains(out, want) {
@@ -329,9 +329,9 @@ func TestAgentsAuthbridgeMissingPipeline(t *testing.T) {
 	srv := newIdentityConfigServer(t, `{"mode": "waypoint"}`, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v\noutput:\n%s", err, out)
+		t.Fatalf("agents authbridge get: %v\noutput:\n%s", err, out)
 	}
 	if !strings.Contains(out, "waypoint") {
 		t.Errorf("output missing the mode:\n%s", out)
@@ -347,9 +347,9 @@ func TestAgentsAuthbridgeUnsetMode(t *testing.T) {
 	srv := newIdentityConfigServer(t, body, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 	if !strings.Contains(out, "(unset)") {
 		t.Errorf("an absent mode should be reported as unset:\n%s", out)
@@ -373,9 +373,9 @@ func TestAgentsAuthbridgeUnparseableConfig(t *testing.T) {
 	srv := newIdentityConfigServer(t, body, 0)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err != nil {
-		t.Fatalf("agents authbridge: %v\noutput:\n%s", err, out)
+		t.Fatalf("agents authbridge get: %v\noutput:\n%s", err, out)
 	}
 	if !strings.Contains(out, "42") {
 		t.Errorf("an unusual plugin config should still be printed:\n%s", out)
@@ -399,8 +399,8 @@ func TestAgentsAuthbridgeNamespaceOverride(t *testing.T) {
 	t.Cleanup(srv.Close)
 	setupAgentGetContext(t, srv)
 
-	if _, err := execute(t, "agents", "--namespace", "team2", "authbridge", "orders"); err != nil {
-		t.Fatalf("agents authbridge: %v", err)
+	if _, err := execute(t, "agents", "--namespace", "team2", "authbridge", "get", "orders"); err != nil {
+		t.Fatalf("agents authbridge get: %v", err)
 	}
 
 	want := "/api/v1/agents/team2/orders/identity-config"
@@ -412,8 +412,74 @@ func TestAgentsAuthbridgeNamespaceOverride(t *testing.T) {
 // TestAgentsAuthbridgeRequiresName verifies the agent name is required.
 func TestAgentsAuthbridgeRequiresName(t *testing.T) {
 	isolateHome(t)
-	if out, err := execute(t, "agents", "authbridge"); err == nil {
-		t.Fatalf("agents authbridge without a name should fail, got:\n%s", out)
+	if out, err := execute(t, "agents", "authbridge", "get"); err == nil {
+		t.Fatalf("agents authbridge get without a name should fail, got:\n%s", out)
+	}
+}
+
+// TestAgentsAuthbridgeIsAGroup pins the move of this command under `get`.
+//
+// The bare group must print help and list `get`, rather than fetching a
+// configuration itself. Without the listing check the test would pass against a
+// group that had lost its subcommand entirely, which is the mistake worth
+// catching here.
+func TestAgentsAuthbridgeIsAGroup(t *testing.T) {
+	isolateHome(t)
+
+	out, err := execute(t, "agents", "authbridge")
+	if err != nil {
+		t.Fatalf("agents authbridge should print help, not error: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Available Commands") {
+		t.Errorf("agents authbridge should list its subcommands:\n%s", out)
+	}
+	if !strings.Contains(out, "get") {
+		t.Errorf("agents authbridge help should list `get`:\n%s", out)
+	}
+}
+
+// TestAgentsAuthbridgeNameNoLongerFetches verifies the old invocation stopped
+// doing the old thing: `agents authbridge orders` must not fetch a
+// configuration.
+//
+// It asserts no configuration is fetched, which is the property that matters.
+// Cobra cannot register two commands under the same name -- whichever is added
+// first wins and the other is unreachable -- so the old leaf surviving beside the
+// new group is not a state this can reach; the risk is the group being registered
+// and the move left half-done.
+//
+// Note what this does NOT assert: that the command fails. Cobra answers a group
+// invoked with an unknown subcommand by printing help and exiting 0, so the old
+// invocation now silently prints help instead of erroring. That is how every
+// group in this tree behaves (`agents import orders` does the same), so it is
+// pinned here as-is rather than made strict for this one group.
+func TestAgentsAuthbridgeNameNoLongerFetches(t *testing.T) {
+	isolateHome(t)
+	// Only identity-config is forbidden: setupAgentGetContext legitimately calls
+	// /namespaces while establishing the context, so a handler that rejected
+	// every request would fail during setup rather than on the invocation.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/identity-config") {
+			t.Errorf("`agents authbridge orders` still fetched a configuration: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespaces": ["team1"]}`))
+	}))
+	t.Cleanup(srv.Close)
+	setupAgentGetContext(t, srv)
+
+	out, err := execute(t, "agents", "authbridge", "orders")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	// No configuration was rendered -- help was.
+	if strings.Contains(out, "Inbound Plugins") {
+		t.Errorf("`agents authbridge <name>` still printed a configuration:\n%s", out)
+	}
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected help output for the bare group:\n%s", out)
 	}
 }
 
@@ -424,7 +490,7 @@ func TestAgentsAuthbridgeServerError(t *testing.T) {
 	srv := newIdentityConfigServer(t, `{"detail":"agent not found"}`, http.StatusNotFound)
 	setupAgentGetContext(t, srv)
 
-	out, err := execute(t, "agents", "authbridge", "orders")
+	out, err := execute(t, "agents", "authbridge", "get", "orders")
 	if err == nil {
 		t.Fatalf("a 404 should fail the command, got:\n%s", out)
 	}
@@ -443,7 +509,7 @@ func TestAgentsAuthbridgeMalformedResponse(t *testing.T) {
 	srv := newIdentityConfigServer(t, `not json at all`, 0)
 	setupAgentGetContext(t, srv)
 
-	if out, err := execute(t, "agents", "authbridge", "orders"); err == nil {
+	if out, err := execute(t, "agents", "authbridge", "get", "orders"); err == nil {
 		t.Fatalf("a malformed body should fail the command, got:\n%s", out)
 	}
 }
@@ -455,9 +521,9 @@ func TestAgentsAuthbridgeVerboseLogsRequest(t *testing.T) {
 	srv := newIdentityConfigServer(t, identityConfigBody, 0)
 	setupAgentGetContext(t, srv)
 
-	stdout, stderr, err := executeSplit(t, "agents", "authbridge", "orders", "--verbose")
+	stdout, stderr, err := executeSplit(t, "agents", "authbridge", "get", "orders", "--verbose")
 	if err != nil {
-		t.Fatalf("agents authbridge -v: %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("agents authbridge get -v: %v\nstderr:\n%s", err, stderr)
 	}
 	if !strings.Contains(stderr, "identity-config") {
 		t.Errorf("stderr missing the request:\n%s", stderr)

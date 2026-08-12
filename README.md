@@ -151,6 +151,13 @@ rossoctl agents list --no-headers | awk '{print $1}' | xargs -n1 rossoctl agents
 rossoctl agents get orders                      # single-column text, laid out like the web detail page
 rossoctl agents get orders --json               # raw JSON
 
+# Show an agent's AuthBridge configuration
+# (GET <server>/agents/<namespace>/<name>/identity-config): the mode, plus the
+# inbound and outbound plugin pipelines in execution order, each plugin with its
+# on_error policy and per-instance config.
+rossoctl agents authbridge get orders
+rossoctl agents authbridge get orders --json    # raw JSON
+
 # Delete an agent (DELETE <server>/agents/<namespace>/<name>)
 rossoctl agents delete orders
 
