@@ -158,6 +158,20 @@ rossoctl agents get orders --json               # raw JSON
 rossoctl agents authbridge get orders
 rossoctl agents authbridge get orders --json    # raw JSON
 
+# Set an agent's AuthBridge configuration
+# (PUT <server>/agents/<namespace>/<name>/identity-config). --policy-file is
+# required; its bytes are sent verbatim as text/plain, so comments and key order
+# survive and the server validates rather than the CLI.
+rossoctl agents authbridge set orders --policy-file ./authbridge.yaml
+
+# --wait reads the configuration before writing, then polls every 2 seconds until
+# what AuthBridge reports differs from that baseline, giving up after 2 minutes.
+# The comparison is against the baseline, not the file: the file is YAML written to
+# a ConfigMap while the GET returns the live JSON a sidecar serves, redacted.
+# Because a change is the signal, re-applying the configuration already in effect
+# cannot be confirmed — it times out and exits non-zero, saying so.
+rossoctl agents authbridge set orders --policy-file ./authbridge.yaml --wait
+
 # Delete an agent (DELETE <server>/agents/<namespace>/<name>)
 rossoctl agents delete orders
 

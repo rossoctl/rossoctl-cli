@@ -325,10 +325,16 @@ func TestListenPortInUse(t *testing.T) {
 }
 
 // TestRouteTableMatchesOpenAPI guards the operation count against accidental
-// edits to the route table. The backend's OpenAPI document lists 43 operations
+// edits to the route table. The backend's OpenAPI document lists 44 operations
 // under /api/v1 plus /health and /ready at the root.
+//
+// It was 43 until PUT /agents/{namespace}/{name}/identity-config was added: the
+// backend has always published it (agents.py declares it beside the GET), and the
+// transcription had simply missed it. Raising this number is therefore only
+// correct alongside evidence that the document grew — otherwise a route invented
+// here would be waved through.
 func TestRouteTableMatchesOpenAPI(t *testing.T) {
-	if got, want := len(APIRoutes()), 43; got != want {
+	if got, want := len(APIRoutes()), 44; got != want {
 		t.Errorf("API route count = %d, want %d", got, want)
 	}
 	if got, want := len(HealthRoutes()), 2; got != want {

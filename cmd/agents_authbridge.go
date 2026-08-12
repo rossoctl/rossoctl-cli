@@ -13,18 +13,26 @@ import (
 
 var agentsAuthbridgeJSON bool
 
-// newAgentsAuthbridgeCmd builds the `agents authbridge` group. It holds only
-// `get` today; the group exists so that reading an agent's AuthBridge
-// configuration and the operations that will act on it are siblings under one
-// noun, rather than the read being the whole of `agents authbridge` and every
-// later addition having to displace it.
+// newAgentsAuthbridgeCmd builds the `agents authbridge` group, holding the read
+// and write of an agent's AuthBridge configuration as siblings under one noun.
 func newAgentsAuthbridgeCmd() *cobra.Command {
-	authbridgeCmd := newGroup("authbridge", "Inspect an agent's AuthBridge configuration")
+	authbridgeCmd := newGroup("authbridge", "Inspect and set an agent's AuthBridge configuration")
 
 	agentsAuthbridgeGetCmd.Flags().BoolVar(&agentsAuthbridgeJSON, "json", false,
 		"print the raw JSON response unchanged")
 
-	authbridgeCmd.AddCommand(agentsAuthbridgeGetCmd)
+	agentsAuthbridgeSetCmd.Flags().StringVar(&agentsAuthbridgeSetPolicyFile, "policy-file", "",
+		"file holding the AuthBridge configuration to store (required)")
+	agentsAuthbridgeSetCmd.Flags().BoolVar(&agentsAuthbridgeSetWait, "wait", false,
+		"after writing, wait until AuthBridge reports a changed configuration")
+	// Required rather than defaulted: there is no sensible default policy, and a
+	// bare `set <name>` most likely means the file was forgotten, not that an
+	// empty configuration should be written over a working one.
+	if err := agentsAuthbridgeSetCmd.MarkFlagRequired("policy-file"); err != nil {
+		panic(err)
+	}
+
+	authbridgeCmd.AddCommand(agentsAuthbridgeGetCmd, agentsAuthbridgeSetCmd)
 	return authbridgeCmd
 }
 

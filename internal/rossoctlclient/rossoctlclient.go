@@ -50,6 +50,15 @@ type Rossoctl interface {
 	// mode and the inbound/outbound plugin pipeline.
 	GetAgentIdentityConfig(ctx context.Context, namespace, name string) (*apiclient.AgentIdentityConfig, error)
 
+	// PutAgentIdentityConfig stores policy as the agent's AuthBridge
+	// configuration, sending it verbatim.
+	//
+	// Not the inverse of GetAgentIdentityConfig: this writes a document to be
+	// loaded, while the GET reports what a running sidecar is serving. The
+	// argument is []byte rather than AgentIdentityConfig for that reason — a
+	// decoded config could not be written back without reshaping it.
+	PutAgentIdentityConfig(ctx context.Context, namespace, name string, policy []byte) (*apiclient.StatusResponse, error)
+
 	// DeleteAgent deletes an agent by namespace and name.
 	DeleteAgent(ctx context.Context, namespace, name string) (*apiclient.DeleteResponse, error)
 

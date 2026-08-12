@@ -120,6 +120,12 @@ var apiRoutes = []Route{
 	{http.MethodGet, "/agents/{namespace}/{name}", agentDetailRoute},
 	{http.MethodPost, "/agents/{namespace}/{name}/finalize-shipwright-build", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/identity-config", agentIdentityConfigRoute},
+	// The PUT has no local meaning: this server reports the configuration a
+	// running instance is serving, and there is no ConfigMap here to write one
+	// into. Listed as a placeholder rather than omitted so `agents authbridge set`
+	// against a cortex context is answered UNIMPLEMENTED, like every other
+	// operation this server does not implement, instead of 405 from the mux.
+	{http.MethodPut, "/agents/{namespace}/{name}/identity-config", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/identity-status", unimplemented},
 	{http.MethodPost, "/agents/{namespace}/{name}/migrate", unimplemented},
 	{http.MethodGet, "/agents/{namespace}/{name}/route-status", agentRouteStatusRoute},

@@ -161,6 +161,31 @@ func (c *Client) doJSON(ctx context.Context, method, path string, out any) error
 // applies auth and logging, checks the status, and decodes the JSON response
 // into out.
 func (c *Client) requestJSON(ctx context.Context, method, path string, body, out any) error {
+	var raw []byte
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encoding request body: %w", err)
+		}
+		raw = data
+	}
+	return c.request(ctx, method, path, raw, "application/json", out)
+}
+
+// requestText issues a request whose body is sent verbatim as text/plain, and
+// decodes the JSON response into out. Used by the identity-config PUT, whose
+// endpoint takes a text/plain body rather than JSON.
+func (c *Client) requestText(ctx context.Context, method, path string, body []byte, out any) error {
+	return c.request(ctx, method, path, body, "text/plain", out)
+}
+
+// request issues a request with the given method and optional pre-encoded body,
+// applies auth and logging, checks the status, and decodes the JSON response
+// into out. contentType is set only when there is a body.
+//
+// A nil body sends none; a non-nil empty one still sets Content-Type, so an
+// intentionally empty document is distinguishable from a bodyless request.
+func (c *Client) request(ctx context.Context, method, path string, body []byte, contentType string, out any) error {
 	endpoint, err := c.resolve(path)
 	if err != nil {
 		return err
@@ -168,11 +193,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body, out
 
 	var reqBody io.Reader
 	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("encoding request body: %w", err)
-		}
-		reqBody = strings.NewReader(string(data))
+		reqBody = bytes.NewReader(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
@@ -181,7 +202,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body, out
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	if c.BearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
@@ -483,6 +504,35 @@ func (c *Client) GetAgentIdentityConfig(ctx context.Context, namespace, name str
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// PutAgentIdentityConfig issues PUT
+// /agents/<namespace>/<name>/identity-config, storing policy as the agent's
+// AuthBridge configuration.
+//
+// The body is sent as text/plain and byte-for-byte as given: the endpoint takes
+// `Body(media_type="text/plain")` and writes the string straight into the
+// authbridge-config-<name> ConfigMap, so this deliberately does not parse or
+// re-serialize it. Anything the server rejects is the server's to report, and
+// re-encoding would risk changing YAML the user hand-wrote (comments, anchors,
+// key order) into something they did not.
+//
+// Note the asymmetry with GetAgentIdentityConfig: this writes YAML to a
+// ConfigMap, while the GET reports the live JSON a running AuthBridge sidecar
+// serves. The two are not round-trip comparable.
+func (c *Client) PutAgentIdentityConfig(ctx context.Context, namespace, name string, policy []byte) (*StatusResponse, error) {
+	path := "agents/" + url.PathEscape(namespace) + "/" + url.PathEscape(name) + "/identity-config"
+
+	var resp StatusResponse
+	if err := c.requestText(ctx, http.MethodPut, path, policy, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// StatusResponse is the {"status": "ok"} the identity-config PUT returns.
+type StatusResponse struct {
+	Status string `json:"status"`
 }
 
 // DeleteResponse mirrors the backend's DeleteResponse model.
