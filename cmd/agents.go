@@ -210,6 +210,7 @@ func init() {
 		newAgentsImportCmd(),
 		agentsGetCmd,
 		agentsListCmd,
+		agentsWaitCmd,
 	)
 	rootCmd.AddCommand(agentsCmd)
 }

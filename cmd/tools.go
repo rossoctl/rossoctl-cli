@@ -185,6 +185,7 @@ func init() {
 		toolsGetCmd,
 		newToolsImportCmd(),
 		toolsDeleteCmd,
+		toolsWaitCmd,
 	)
 	rootCmd.AddCommand(toolsCmd)
 }

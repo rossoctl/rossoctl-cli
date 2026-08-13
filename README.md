@@ -151,6 +151,19 @@ rossoctl agents list --no-headers | awk '{print $1}' | xargs -n1 rossoctl agents
 rossoctl agents get orders                      # single-column text, laid out like the web detail page
 rossoctl agents get orders --json               # raw JSON
 
+# Wait for an agent to become ready, polling GET <server>/agents/<namespace>/<name>
+# every 2 seconds. Exits 0 as soon as it is ready, so it can gate what follows.
+rossoctl agents wait orders
+rossoctl agents wait orders --timeout 5m        # default 60s; --timeout 0 waits indefinitely
+rossoctl agents wait orders -v                  # report progress on stderr while waiting
+
+rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:latest \
+    && rossoctl agents wait orders --timeout 5m \
+    && ./run-integration-tests.sh
+# Waiting ends early and non-zero when readiness will never arrive: a failed job or
+# a rollout past its deadline, or a name the server does not know (404). Reporting
+# that immediately beats spending the timeout to report the wrong cause.
+
 # Show an agent's AuthBridge configuration
 # (GET <server>/agents/<namespace>/<name>/identity-config): the mode, plus the
 # inbound and outbound plugin pipelines in execution order, each plugin with its
@@ -204,6 +217,7 @@ rossoctl tools list --no-headers | awk '{print $1}' | xargs -n1 rossoctl tools d
 rossoctl tools --namespace team2 list --json
 rossoctl tools get weather-mcp                   # GET /tools/<namespace>/weather-mcp (single-column detail)
 rossoctl tools get weather-mcp --json            # raw JSON response
+rossoctl tools wait weather-mcp                  # poll until ready; default --timeout 60s
 rossoctl tools delete weather-mcp                # DELETE /tools/<namespace>/weather-mcp
 rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest  # POST /tools
 rossoctl tools import --deployment-type statefulset from-image \
@@ -213,6 +227,15 @@ rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y
     --envVar LOG_LEVEL=debug --envVar 'TAGS=a,b,c'
 # --ports sets service ports as name:port:targetPort[:protocol] (default http:9090:9090:TCP); a bare "port" = http:port:port:TCP
 rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest --ports grpc:9000:9001:TCP,8080
+
+# A tool built from source reports "Building" until its build finishes, which is
+# often longer than the 60s default, so allow for it. A failed build reports
+# "Build Failed" and ends the wait immediately rather than burning the timeout on
+# a workload that will never be created.
+rossoctl tools wait weather-mcp --timeout 10m
+# Against the local "cortex" context `tools wait` runs to its timeout: that server
+# does not implement the tool detail endpoint it polls (`tools get` fails there for
+# the same reason), so use `tools list` to check a local tool. `agents wait` works.
 
 # List namespaces (GET <server>/namespaces)
 rossoctl namespaces list
