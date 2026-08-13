@@ -35,9 +35,12 @@ var cortexServeCmd = &cobra.Command{
 
 Run this to point a web UI at a local cortex. rossoctl's own commands do not
 need it: a context named "cortex" is answered by these same handlers inside the
-command's own process, so "agents list" works with nothing listening. Use
-"rossoctl config create-context --name cortex" for that, and this command when
-something other than rossoctl has to reach the API over HTTP.
+command's own process, so "agents list" works with nothing listening. Use this
+command when something other than rossoctl has to reach the API over HTTP.
+
+Starting the server creates the "cortex" context if it does not exist and makes
+it current, so rossoctl's own commands reach this local cortex afterwards without
+a separate "login --cortex". Switch back with "rossoctl config use-context".
 
 The server exposes the same set of operations as the backend's published
 OpenAPI document, so a UI pointed at it finds every endpoint it expects. Most
@@ -97,6 +100,15 @@ The server runs until interrupted.`,
 		ln, err := srv.Listen()
 		if err != nil {
 			return err
+		}
+
+		// After the bind, so an unusable --address fails without having touched the
+		// config, and before Serve, so the context is in place by the time anything
+		// can reach the server. Best-effort: a config that cannot be written is not
+		// a reason to refuse to serve, since the server itself reads none of it. The
+		// switch is silent, as `login --cortex` is.
+		if err := ensureCortexContext(cmd, true); err != nil && verbose {
+			fmt.Fprintf(cmd.ErrOrStderr(), "could not update the cortex context: %v\n", err)
 		}
 
 		out := cmd.OutOrStdout()

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +23,51 @@ func loadTestConfig(t *testing.T) *config.Config {
 		t.Fatalf("Load: %v", err)
 	}
 	return cfg
+}
+
+// cortexTestContextName re-exports config.CortexContextName for test files where
+// "config" names authbridge's package instead of rossoctl's.
+const cortexTestContextName = config.CortexContextName
+
+// writeContextConfig writes a config holding exactly the named context, and
+// nothing else, as the config under the isolated HOME.
+//
+// Tests use it to build a precise starting state that no CLI command can produce:
+// `config create-context` seeds a cortex context of its own, so it cannot set up
+// a config that deliberately lacks one.
+//
+// Takes strings rather than a config.Context so callers in files where "config"
+// names authbridge's package can use it without importing rossoctl's too.
+func writeContextConfig(t *testing.T, name, server string) {
+	t.Helper()
+	path, err := config.DefaultPath()
+	if err != nil {
+		t.Fatalf("DefaultPath: %v", err)
+	}
+	// Load binds the config to path — Save needs that, and it is unexported, so a
+	// literal &config.Config{} cannot be saved. A missing file loads as empty.
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", path, err)
+	}
+	cfg.Contexts = []config.Context{{Name: name, Server: server}}
+	cfg.CurrentContext = ""
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+}
+
+// findTestContext reports the named context from cfg, and whether it is there.
+//
+// Distinct from cfg.Get only in taking the loaded config as a value, so a test
+// can assert against a snapshot taken before the command ran.
+func findTestContext(cfg *config.Config, name string) (config.Context, bool) {
+	for _, ctx := range cfg.Contexts {
+		if ctx.Name == name {
+			return ctx, true
+		}
+	}
+	return config.Context{}, false
 }
 
 // The cortex group's visibility in help listings is covered by
@@ -120,5 +166,95 @@ func TestCortexServeTakesNoArgs(t *testing.T) {
 
 	if _, err := execute(t, "cortex", "serve", "extra"); err == nil {
 		t.Error("cortex serve should reject positional arguments")
+	}
+}
+
+// TestCortexServeRejectsBadAddressBeforeTouchingConfig pins the ordering: the
+// context is ensured only after a successful bind, so an invocation that cannot
+// serve does not repoint the user's current context on its way out.
+func TestCortexServeRejectsBadAddressBeforeTouchingConfig(t *testing.T) {
+	path := isolateHome(t)
+
+	if _, err := execute(t, "cortex", "serve", "--address", "localhost"); err == nil {
+		t.Fatal("cortex serve --address localhost should error")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a failed serve wrote %s; the context must be left alone (stat err: %v)", path, err)
+	}
+}
+
+// TestEnsureCortexContextMakesCurrent covers the makeCurrent=true half of the
+// helper, which is what `cortex serve` uses: an existing current context is
+// replaced, so rossoctl's own commands reach the cortex just started.
+func TestEnsureCortexContextMakesCurrent(t *testing.T) {
+	isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", "mine", "--server", "http://mine/api/v1/"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	if err := ensureCortexContext(rootCmd, true); err != nil {
+		t.Fatalf("ensureCortexContext: %v", err)
+	}
+
+	cfg := loadTestConfig(t)
+	if cfg.CurrentContext != config.CortexContextName {
+		t.Errorf("current context = %q, want %q", cfg.CurrentContext, config.CortexContextName)
+	}
+	// The context it replaced as current must still exist, so switching back is
+	// possible.
+	if _, ok := findTestContext(cfg, "mine"); !ok {
+		t.Error(`the "mine" context is gone; making cortex current must not remove it`)
+	}
+}
+
+// TestEnsureCortexContextPreservesExistingCortex pins that an already-configured
+// cortex context is not overwritten. A user who set a namespace on it, or pointed
+// it at a non-default address for `cortex serve --address`, keeps both.
+func TestEnsureCortexContextPreservesExistingCortex(t *testing.T) {
+	isolateHome(t)
+
+	if _, err := execute(t, "config", "create-context",
+		"--name", config.CortexContextName,
+		"--server", "http://localhost:9999/api/v1/", "--namespace", "mine"); err != nil {
+		t.Fatalf("create-context: %v", err)
+	}
+
+	if err := ensureCortexContext(rootCmd, true); err != nil {
+		t.Fatalf("ensureCortexContext: %v", err)
+	}
+
+	cortex, ok := findTestContext(loadTestConfig(t), config.CortexContextName)
+	if !ok {
+		t.Fatal("the cortex context is gone")
+	}
+	if cortex.Namespace != "mine" {
+		t.Errorf("namespace = %q, want %q; an existing cortex context must not be reset",
+			cortex.Namespace, "mine")
+	}
+	if cortex.Server != "http://localhost:9999/api/v1/" {
+		t.Errorf("server = %q; an existing cortex context must not be reset", cortex.Server)
+	}
+}
+
+// TestEnsureCortexContextDoesNotElectWithoutMakeCurrent is the assertion that
+// distinguishes exec's use of the helper from serve's. With makeCurrent false the
+// context is created, and the current-context reference is left exactly as it was
+// — including left unset on a fresh machine, rather than defaulting to the one
+// context that now exists.
+func TestEnsureCortexContextDoesNotElectWithoutMakeCurrent(t *testing.T) {
+	isolateHome(t)
+
+	if err := ensureCortexContext(rootCmd, false); err != nil {
+		t.Fatalf("ensureCortexContext: %v", err)
+	}
+
+	cfg := loadTestConfig(t)
+	if _, ok := findTestContext(cfg, config.CortexContextName); !ok {
+		t.Error("the cortex context was not created")
+	}
+	if cfg.CurrentContext != "" {
+		t.Errorf("current context = %q, want unset", cfg.CurrentContext)
 	}
 }

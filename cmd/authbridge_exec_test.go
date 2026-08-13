@@ -240,26 +240,17 @@ func TestCortexFlagRemovedFromGroups(t *testing.T) {
 	}
 }
 
-// TestAuthbridgeExecLeavesContextAlone is the regression test for exec's context
-// independence. exec is configured entirely by --config, so hosting a command
-// behind a pipeline must not create a context, switch the current one, or even
-// bring the config file into existence — it previously did all three via
-// resolveCortexContext, silently repointing every later rossoctl invocation.
-func TestAuthbridgeExecLeavesContextAlone(t *testing.T) {
-	t.Run("no config file is created", func(t *testing.T) {
-		path := isolateHome(t)
-		cfg := writeConfig(t, pipelineOnlyConfig(t))
-
-		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
-			t.Fatalf("exec failed: exit %d", code)
-		}
-
-		// The context config must not be brought into existence at all.
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("exec created %s; it should not touch the context config (stat err: %v)", path, err)
-		}
-	})
-
+// TestAuthbridgeExecLeavesCurrentContextAlone is the regression test for the half
+// of exec's context independence that still holds: it must never switch the
+// current context. It once did, via resolveCortexContext, silently repointing
+// every later rossoctl invocation at a different context as a side effect of
+// running an unrelated command.
+//
+// exec does now ensure the cortex context exists, because the instances it starts
+// are what a local cortex serves. That is additive — it changes what is available
+// to point at, never where anything points — so these tests pin the current
+// context and the other contexts, not the config's untouchedness.
+func TestAuthbridgeExecLeavesCurrentContextAlone(t *testing.T) {
 	t.Run("the current context is preserved", func(t *testing.T) {
 		isolateHome(t)
 
@@ -270,7 +261,6 @@ func TestAuthbridgeExecLeavesContextAlone(t *testing.T) {
 		}
 		before := loadTestConfig(t)
 		wantCurrent := before.CurrentContext
-		wantCount := len(before.Contexts)
 
 		cfg := writeConfig(t, pipelineOnlyConfig(t))
 		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
@@ -282,9 +272,58 @@ func TestAuthbridgeExecLeavesContextAlone(t *testing.T) {
 			t.Errorf("current context = %q, want %q; exec must not switch contexts",
 				after.CurrentContext, wantCurrent)
 		}
-		if len(after.Contexts) != wantCount {
-			t.Errorf("context count = %d, want %d; exec must not add a context",
-				len(after.Contexts), wantCount)
+		// The pre-existing context must survive untouched: ensuring cortex exists
+		// may add, never replace or drop.
+		if _, ok := findTestContext(after, "mine"); !ok {
+			t.Error(`the "mine" context is gone; exec must only add`)
+		}
+	})
+
+	t.Run("the cortex context is created when absent", func(t *testing.T) {
+		isolateHome(t)
+
+		// A config holding exactly one context, and not a cortex one, so the
+		// assertion below is about what exec added rather than about seeding done by
+		// some earlier command. (`config create-context` seeds a cortex context
+		// itself, so it cannot be used to build this starting state.)
+		writeContextConfig(t, "mine", "http://mine/api/v1/")
+
+		cfg := writeConfig(t, pipelineOnlyConfig(t))
+		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
+			t.Fatalf("exec failed: exit %d", code)
+		}
+
+		// The instances exec starts are served by a local cortex, and the context is
+		// what routes a later `agents list` to them.
+		if _, ok := findTestContext(loadTestConfig(t), cortexTestContextName); !ok {
+			t.Error(`exec did not create the "cortex" context`)
+		}
+	})
+
+	t.Run("with no config, cortex is created but not made current", func(t *testing.T) {
+		isolateHome(t)
+
+		cfg := writeConfig(t, pipelineOnlyConfig(t))
+		if _, code := execExitCode(t, "authbridge", "exec", "--config", cfg, "--", "true"); code != 0 {
+			t.Fatalf("exec failed: exit %d", code)
+		}
+
+		// On a machine with no config, exec seeds only cortex, and leaves the current
+		// context unset rather than electing one. A later rossoctl command therefore
+		// still has no context, exactly as before this behavior was added — the user
+		// picks one; exec does not pick for them.
+		after := loadTestConfig(t)
+		if _, ok := findTestContext(after, cortexTestContextName); !ok {
+			t.Error(`exec did not create the "cortex" context`)
+		}
+		if after.CurrentContext != "" {
+			t.Errorf("current context = %q, want unset; exec must not elect a context",
+				after.CurrentContext)
+		}
+		// Only cortex: exec must not seed the full default set, which includes a
+		// context pointing at a remote API server.
+		if len(after.Contexts) != 1 {
+			t.Errorf("context count = %d, want 1 (cortex only)", len(after.Contexts))
 		}
 	})
 }

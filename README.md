@@ -113,6 +113,10 @@ rossoctl login --server http://host:8080/api/v1/ --token <token>   # target the 
 # makes it current without contacting anything; its namespace comes from those
 # local records.
 rossoctl login --cortex                         # switch to the local cortex; no network, no token
+# `cortex serve` and `authbridge exec` both create that context if it is missing,
+# so `login --cortex` is usually unnecessary. `cortex serve` also makes it current;
+# `authbridge exec` deliberately does not, since it hosts an unrelated command and
+# must not repoint later invocations. Switch back with `config use-context`.
 
 # Inspect the bearer token stored on the context (decoded locally; nothing is sent)
 rossoctl auth status                            # name/username/email, issuer, expiry, audiences, roles, scopes

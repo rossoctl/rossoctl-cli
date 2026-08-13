@@ -225,11 +225,15 @@ tool results. Bind it to a loopback address only.`,
 //
 // It deliberately does not resolve a context. exec is configured entirely by
 // --config, so it needs nothing from the context config: no server, token, or
-// namespace is ever read. It used to call resolveCortexContext, which creates a
-// cortex-typed context and makes it *current* as a side effect — meaning running
-// a command behind a pipeline silently repointed every later rossoctl
-// invocation at a different context. Nothing here consumed the result, so the
-// call was pure side effect and is gone.
+// namespace is ever read.
+//
+// It does ensure the cortex context exists, because the instances it starts are
+// what a local cortex serves, and a later `agents list` needs that context to
+// reach them. It deliberately does not make it *current*: it used to, via
+// resolveCortexContext, which meant running a command behind a pipeline silently
+// repointed every later rossoctl invocation at a different context. Creating the
+// context is additive and carries none of that surprise — it changes what is
+// available to point at, not where anything points.
 func runCortexExec(cmd *cobra.Command, args []string) error {
 	argv, err := passthroughArgs(cmd, args)
 	if err != nil {
@@ -255,6 +259,15 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 		if _, ok := cfg.Get(contextOverride); !ok {
 			return fmt.Errorf("no context named %q", contextOverride)
 		}
+	}
+
+	// After the validation above, so an invocation that is going to be rejected
+	// does not write a config file first. Best-effort and silent: nothing here
+	// reads the context, so a read-only config directory must not stop the hosted
+	// command from running, and the operator asked to run a command rather than to
+	// manage contexts.
+	if err := ensureCortexContext(cmd, false); err != nil && verbose {
+		fmt.Fprintf(cmd.ErrOrStderr(), "could not create the cortex context: %v\n", err)
 	}
 
 	// Redirect authbridge's logging to the logfile before anything that logs
@@ -435,9 +448,11 @@ func instanceName(namespace string) (string, error) {
 // naming a nonexistent context is still rejected, but that check happens earlier
 // in RunE.
 //
-// The lookup is read-only, and deliberately not resolveContext: that seeds a
-// default context on first use, and exec must not create a config file as a side
-// effect of recording an instance.
+// The lookup is read-only, and deliberately not resolveContext: that seeds the
+// full default context set, including a context pointing at a remote API server,
+// which is more than recording a local instance justifies. RunE does ensure the
+// cortex context exists, but that is one additive context and it never changes
+// which one is current.
 func execNamespace() (string, error) {
 	if ns := execArgs.namespace; ns != "" {
 		if err := instances.ValidName(ns); err != nil {

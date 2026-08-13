@@ -1,5 +1,79 @@
 package cmd
 
+import (
+	"github.com/spf13/cobra"
+
+	"github.com/rossoctl/rossoctl-cli/internal/config"
+)
+
+// ensureCortexContext creates the cortex context when it is absent, and makes it
+// current when makeCurrent is set.
+//
+// Both commands that start a local cortex call this so that the context naming it
+// exists without the user having to run `config create-context` or
+// `login --cortex` first: having started a cortex, they are plainly working with
+// one, and the context is what routes a later `agents list` to it.
+//
+// makeCurrent is a parameter rather than always true because the two callers
+// differ on exactly that point, and only that point:
+//
+//   - `cortex serve` switches. Serving a local cortex in the foreground is a
+//     statement about what the user is working on, and the command holds the
+//     terminal until interrupted, so the switch is neither a surprise nor
+//     something that happens behind an unrelated task.
+//   - `authbridge exec` does not. It hosts an arbitrary command behind a
+//     pipeline and reads nothing from the context — no server, token, or
+//     namespace — so switching would repoint every later rossoctl invocation as
+//     a side effect of running something unrelated. That side effect was a bug
+//     once already; see runCortexExec.
+//
+// Creating the context is safe in both cases because it is additive: it changes
+// where nothing points, only what is available to point at.
+//
+// Best-effort by design — the returned error is for the caller to report or drop.
+// Neither caller's real work needs the config, so a read-only config directory
+// should not stop a server from serving or a command from running.
+func ensureCortexContext(cmd *cobra.Command, makeCurrent bool) error {
+	// loadConfigReadOnly, not loadConfig: loadConfig seeds the whole default
+	// context set on first use, including one pointing at the default *remote* API
+	// server, and elects it current. Starting a local cortex is no reason to
+	// configure a remote server, and for exec it would reintroduce exactly the
+	// silent repointing this helper is careful to avoid. Here the only context that
+	// ever comes into existence is cortex.
+	cfg, err := loadConfigReadOnly()
+	if err != nil {
+		return err
+	}
+
+	target, ok := cfg.Get(config.CortexContextName)
+	if !ok {
+		cfg.Upsert(config.CortexContext())
+		target, _ = cfg.Get(config.CortexContextName)
+	} else if !makeCurrent && target.Namespace != "" {
+		// Already present and nothing to change: return before Save so an existing
+		// config is not rewritten on every exec.
+		return nil
+	}
+
+	if makeCurrent {
+		if err := cfg.SetCurrent(target.Name); err != nil {
+			return err
+		}
+	}
+
+	// Same best-effort namespace fill as `login --cortex`: a cortex context with
+	// no namespace is rejected before any request is built, and the namespaces
+	// come from the local instance records rather than from a server. A machine
+	// where nothing has run yet simply has none to offer.
+	if target.Namespace == "" {
+		if ns := firstNamespace(cmd, target); ns != "" {
+			target.Namespace = ns
+		}
+	}
+
+	return cfg.Save()
+}
+
 func init() {
 	cortexCmd := newGroup("cortex", "Manage cortexes")
 
