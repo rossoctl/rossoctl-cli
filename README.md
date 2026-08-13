@@ -250,6 +250,25 @@ rossoctl namespaces list --json
 rossoctl -v agents list
 ```
 
+## Tests
+
+```sh
+make test                      # go test ./...
+make vet
+gofmt -l .                     # prints files needing formatting; make fmt rewrites them
+go test ./... -race -count=1
+go test ./... -count=1 -shuffle=on
+```
+
+The suite needs no services, credentials, or network access: tests bind ephemeral
+localhost ports and point `HOME` at a temp directory, and the container tests
+assert on the command strings they would run rather than invoking a real runtime.
+
+`.github/workflows/ci.yml` runs exactly these on every pull request and on pushes
+to `main`, plus a `go mod tidy` check. Shuffled order is included because the
+suite mutates process state (`HOME`, cobra flag values), so an order-dependent
+test is a real risk — see the pflag hazard documented in `cmd/root_test.go`.
+
 ## Full docs
 
 See [the documentation](./docs)

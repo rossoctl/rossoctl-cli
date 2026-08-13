@@ -1,0 +1,89 @@
+name: ci
+
+# Run the repo's checks on pull requests, and on pushes to main so a merge that
+# breaks something is attributed to the merge rather than to the next PR.
+#
+# The checks mirror the Makefile targets a contributor runs locally (fmt, vet,
+# test), so CI failing means the same command fails on their machine. gofmt is
+# checked with -l rather than `make fmt`, which rewrites files: CI must report
+# formatting, not silently fix it and test something the author never wrote.
+#
+# Tests are self-contained — they bind ephemeral localhost ports and set HOME to
+# a temp dir, and the container tests assert on generated command strings without
+# invoking a real runtime — so no services, credentials, or network egress are
+# needed.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: nothing here writes to the repo, and the default token grants more.
+permissions:
+  contents: read
+
+# A force-push or a quick follow-up commit makes an in-flight run obsolete;
+# cancel it rather than paying for a result nobody reads. Pushes to main are
+# keyed per-ref, so consecutive merges do not cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single source of the Go version, as in release.yml.
+          go-version-file: go.mod
+
+      # Before the build, so a formatting failure is reported in seconds rather
+      # than after the slowest step.
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      # `go mod tidy` writing nothing proves go.mod and go.sum match the imports.
+      # Checked against the real files rather than a copy so the diff names them.
+      - name: Check go.mod is tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "go.mod/go.sum are not tidy; run 'make tidy' and commit the result:" >&2
+            git diff -- go.mod go.sum >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: make vet
+
+      - name: Build
+        run: go build ./...
+
+      # -count=1 defeats the test cache, which would otherwise let a green result
+      # stand in for a run that never happened on this commit.
+      - name: Test
+        run: go test ./... -count=1
+
+      # A second pass under the race detector. Separate from the run above so a
+      # plain failure is not reported as a race, and because the suite is fast
+      # enough (a few seconds) that running it twice costs little.
+      - name: Test with the race detector
+        run: go test ./... -race -count=1
+
+      # Test order is a real source of flakes here: the suite mutates process
+      # state (HOME, XDG_CONFIG_HOME, cobra flag values), and cmd/root_test.go
+      # documents a pflag hazard where a flag's first Set in a later test can
+      # append rather than replace. Shuffling surfaces that in CI instead of on
+      # someone's unrelated PR.
+      - name: Test in a shuffled order
+        run: go test ./... -count=1 -shuffle=on
