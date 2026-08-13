@@ -3,16 +3,68 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
+
+// TestIsUnresolvedHost is the whole taxonomy in one place: which failures count
+// as "that hostname does not exist" and which do not.
+//
+// The wrapped case is the load-bearing one. The a2a client returns the DNS error
+// buried two layers down (fmt.wrapError around *url.Error), so a check that only
+// looked at the top-level error would find nothing and the hint would never
+// appear in the one situation it exists for.
+func TestIsUnresolvedHost(t *testing.T) {
+	notFound := &net.DNSError{Err: "no such host", Name: "orders.team1.invalid", IsNotFound: true}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bare not-found", notFound, true},
+		{
+			// Exactly the shape the a2a client produces; see the doc comment.
+			"wrapped as the a2a client wraps it",
+			fmt.Errorf("failed to send HTTP request: %w",
+				&url.Error{Op: "Post", URL: "http://orders.team1.invalid:8080", Err: notFound}),
+			true,
+		},
+		{
+			// A resolver that timed out is not a name that does not exist: the
+			// address may be perfectly good, so telling the user to go find a
+			// different one sends them after the wrong problem.
+			"DNS timeout",
+			&net.DNSError{Err: "i/o timeout", Name: "orders.team1.invalid", IsTimeout: true},
+			false,
+		},
+		{
+			"DNS temporary failure",
+			&net.DNSError{Err: "server misbehaving", Name: "orders.team1.invalid", IsTemporary: true},
+			false,
+		},
+		{"connection refused", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false},
+		{"unrelated error", errors.New("no such host"), false}, // the text alone must not match
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUnresolvedHost(tc.err); got != tc.want {
+				t.Errorf("isUnresolvedHost(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 // echoExecutor is a minimal A2A agent that streams back a status update and a
 // message echoing what it was sent. It gives the send tests a real server to

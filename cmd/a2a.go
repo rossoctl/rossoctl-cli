@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -119,6 +121,14 @@ type a2aSendOptions struct {
 	transport         string
 	message           string
 	withAuthorization bool
+
+	// unresolvedAddressHint, if non-empty, is printed on stderr when the send
+	// fails because the address did not resolve in DNS. It is supplied by the
+	// caller rather than built here because the useful advice depends on how the
+	// address was arrived at: `agents chat` derived it from the agent's card and
+	// can name the agent to put in an --address, while `a2a send` was handed the
+	// address by the user and has nothing to add.
+	unresolvedAddressHint string
 }
 
 // a2aLogger is an http.RoundTripper that logs each A2A request and its status,
@@ -203,6 +213,20 @@ func a2aUnauthorizedHint(status int, withAuthorization bool) string {
 		"run `rossoctl login` again to pick up the scopes for it."
 }
 
+// isUnresolvedHost reports whether err was caused by a hostname that does not
+// resolve.
+//
+// The match is on *net.DNSError with IsNotFound set, not on the "no such host"
+// text. The a2a client wraps the failure twice over (fmt.wrapError around
+// *url.Error around *net.DNSError), but the chain survives, so errors.As finds
+// it — and matching the type keeps a name that does not exist distinct from a
+// resolver that timed out or refused, which is a different problem with
+// different advice.
+func isUnresolvedHost(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
 // streamA2AMessage sends one message to an A2A agent and prints the events it
 // streams back.
 //
@@ -284,6 +308,12 @@ func streamA2AMessage(cmd *cobra.Command, opts a2aSendOptions) error {
 			// unaffected.
 			if hint := a2aUnauthorizedHint(logger.status, opts.withAuthorization); hint != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), hint)
+			}
+			// An address that does not resolve is reported by the a2a client as a
+			// send failure, which says nothing about where the address came from.
+			// Same contract as the 401 hint: stderr only, error returned unchanged.
+			if opts.unresolvedAddressHint != "" && isUnresolvedHost(err) {
+				fmt.Fprintln(cmd.ErrOrStderr(), opts.unresolvedAddressHint)
 			}
 			return err
 		}

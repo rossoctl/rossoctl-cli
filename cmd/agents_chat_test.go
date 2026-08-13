@@ -371,6 +371,150 @@ func TestAgentsChat401HintWithFlag(t *testing.T) {
 	}
 }
 
+// unresolvableAddress is a URL whose host cannot resolve anywhere. RFC 2606
+// reserves .invalid for exactly this, so the DNS failure is guaranteed rather
+// than dependent on the network the test runs on — a made-up name under a real
+// TLD can be answered by a wildcard or a captive resolver.
+const unresolvableAddress = "http://orders.team1.rossoctl-nonexistent.invalid:8080/"
+
+// TestAgentsChatUnresolvedCardURLHint is the central case for this hint: the card
+// advertises a hostname that does not resolve from here, which is what happens
+// when the URL is cluster-internal. The advice has to explain that chat bypasses
+// the platform API — the backend was reachable enough to serve the card, so the
+// bare DNS error reads as a puzzle.
+func TestAgentsChatUnresolvedCardURLHint(t *testing.T) {
+	isolateHome(t)
+	backend, _ := newChatBackend(t, unresolvableAddress)
+	setupAgentGetContext(t, backend)
+
+	_, stderr, err := executeSplit(t, "agents", "chat", "orders", "--message", "hi")
+	if err == nil {
+		t.Fatal("an address that does not resolve should fail the command")
+	}
+	// The three things the user needs: that this is a direct A2A call, the flag
+	// that fixes it, and an example naming this very agent.
+	for _, want := range []string{
+		"A2A directly",
+		"agent-card",
+		"--address http://<route>:<port>",
+		"--address http://orders.team1.localtest.me:8080",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should mention %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestAgentsChatUnresolvedHintUsesRealNamespace verifies the example is built
+// from the namespace actually in effect, not a hardcoded one. An example naming
+// the wrong namespace would be copied and would fail.
+func TestAgentsChatUnresolvedHintUsesRealNamespace(t *testing.T) {
+	isolateHome(t)
+	backend, _ := newChatBackend(t, unresolvableAddress)
+	setupAgentGetContext(t, backend)
+
+	_, stderr, err := executeSplit(t, "agents", "--namespace", "team2", "chat", "orders",
+		"--message", "hi")
+	if err == nil {
+		t.Fatal("an address that does not resolve should fail the command")
+	}
+	if !strings.Contains(stderr, "--address http://orders.team2.localtest.me:8080") {
+		t.Errorf("the example should name the team2 namespace:\n%s", stderr)
+	}
+}
+
+// TestAgentsChatUnresolvedAddressFlagHint verifies the hint also covers an
+// address the user supplied. --address is the remedy the hint suggests, so a
+// second unresolvable value passed to it is precisely when someone needs to be
+// told the address, not the agent, is the problem.
+func TestAgentsChatUnresolvedAddressFlagHint(t *testing.T) {
+	isolateHome(t)
+	backend, _ := newChatBackend(t, "")
+	setupAgentGetContext(t, backend)
+
+	_, stderr, err := executeSplit(t, "agents", "chat", "orders",
+		"--address", unresolvableAddress, "--message", "hi")
+	if err == nil {
+		t.Fatal("an address that does not resolve should fail the command")
+	}
+	if !strings.Contains(stderr, "has to resolve from here") {
+		t.Errorf("stderr should explain the address must resolve:\n%s", stderr)
+	}
+}
+
+// TestAgentsChatNoUnresolvedHintOnReachableFailure verifies the hint is confined
+// to a name that does not resolve. An agent that is reachable and answers an
+// error has no address problem, and telling its user to go find a route would
+// send them after the wrong thing.
+func TestAgentsChatNoUnresolvedHintOnReachableFailure(t *testing.T) {
+	isolateHome(t)
+	agent := newRejectingAgent(t, http.StatusInternalServerError)
+	backend, _ := newChatBackend(t, agent.URL)
+	setupAgentGetContext(t, backend)
+
+	_, stderr, err := executeSplit(t, "agents", "chat", "orders", "--message", "hi")
+	if err == nil {
+		t.Fatal("a 500 from the agent should fail the command")
+	}
+	if strings.Contains(stderr, "--address") {
+		t.Errorf("a reachable agent's error should produce no address hint:\n%s", stderr)
+	}
+}
+
+// TestAgentsChatNoUnresolvedHintOnRefusedConnection scopes the hint to DNS
+// specifically. A host that resolves but refuses the connection is a different
+// problem — the address is right and something is down — so the DNS advice must
+// not fire. This is what matching *net.DNSError buys over matching the error
+// text of a failed send.
+func TestAgentsChatNoUnresolvedHintOnRefusedConnection(t *testing.T) {
+	isolateHome(t)
+	// A closed port on loopback: resolves fine, refuses immediately.
+	backend, _ := newChatBackend(t, "http://127.0.0.1:1/")
+	setupAgentGetContext(t, backend)
+
+	_, stderr, err := executeSplit(t, "agents", "chat", "orders", "--message", "hi")
+	if err == nil {
+		t.Fatal("a refused connection should fail the command")
+	}
+	if strings.Contains(stderr, "Hint:") {
+		t.Errorf("a refused connection is not a DNS failure; no hint expected:\n%s", stderr)
+	}
+}
+
+// TestA2ASendNoUnresolvedHint verifies `a2a send` stays silent on the same
+// failure. Its address came from the user's own --address, so there is nothing to
+// reveal and no name to build an example from; the hint belongs to the command
+// that resolved the address on the user's behalf.
+func TestA2ASendNoUnresolvedHint(t *testing.T) {
+	isolateHome(t)
+
+	_, stderr, err := executeSplit(t, "a2a", "send",
+		"--address", unresolvableAddress, "--message", "hi")
+	if err == nil {
+		t.Fatal("an address that does not resolve should fail the command")
+	}
+	if strings.Contains(stderr, "Hint:") {
+		t.Errorf("a2a send should add no hint to its own --address:\n%s", stderr)
+	}
+}
+
+// TestUnresolvedAgentAddressHintWithoutNamespace verifies an unresolvable
+// namespace degrades to advice without an example, rather than to one naming an
+// empty namespace. `--address http://orders..localtest.me:8080` would be a
+// malformed URL offered as the fix.
+func TestUnresolvedAgentAddressHintWithoutNamespace(t *testing.T) {
+	hint := unresolvedAgentAddressHint("", "orders")
+	if hint == "" {
+		t.Fatal("the advice should survive a missing namespace")
+	}
+	if strings.Contains(hint, "For example") {
+		t.Errorf("no example should be offered without a namespace:\n%s", hint)
+	}
+	if !strings.Contains(hint, "--address http://<route>:<port>") {
+		t.Errorf("the generic form should still be suggested:\n%s", hint)
+	}
+}
+
 // TestAgentsChatNoHintOnOtherFailures verifies the hint is confined to 401. A 403
 // and a 500 are not credential problems, and advice that does not apply is worse
 // than none.

@@ -31,6 +31,11 @@ Because the card is served by the agent itself and proxied by the backend, the
 default path only works while the agent is running — an agent that is not ready
 has no card, and so no URL to derive.
 
+Note the message goes straight to the agent, not through the platform API, so the
+card's hostname has to resolve from where this runs. A cluster-internal name
+often does not, which fails with "no such host" even though the API server is
+perfectly reachable; --address http://<route>:<port> is the way past it.
+
 --transport, --message and --with-authorization mean what they do for
 ` + "`a2a send`" + `: the message text is sent as a single user text part, the
 response is streamed event by event as it arrives, and --with-authorization
@@ -57,13 +62,47 @@ With --verbose both the card lookup and the message are reported on stderr.`,
 			}
 		}
 
+		// The namespace is resolved again here rather than threaded out of
+		// agentCardURL because --address skips that call entirely, and the hint is
+		// most useful in exactly that case's neighbour: an address, from wherever,
+		// that does not resolve. A namespace that cannot be resolved yields no
+		// example rather than failing the send.
+		namespace, _ := agentsNamespace()
+
 		return streamA2AMessage(cmd, a2aSendOptions{
-			address:           address,
-			transport:         agentsChatArgs.transport,
-			message:           agentsChatArgs.message,
-			withAuthorization: agentsChatArgs.withAuthorization,
+			address:               address,
+			transport:             agentsChatArgs.transport,
+			message:               agentsChatArgs.message,
+			withAuthorization:     agentsChatArgs.withAuthorization,
+			unresolvedAddressHint: unresolvedAgentAddressHint(namespace, name),
 		})
 	},
+}
+
+// unresolvedAgentAddressHint returns the advice to offer when `agents chat`
+// cannot resolve the address it is talking to.
+//
+// The failure is confusing because of what chat does not do: it does not relay
+// the message through the platform API, it speaks A2A straight to the agent, at
+// the URL the agent's own card advertises. So a working `agents get` and a
+// reachable backend are no guarantee the address in the card resolves from here
+// — a cluster-internal hostname routinely does not.
+//
+// The example is built from the agent's own namespace and name so it can be
+// edited into a working flag rather than translated first. localtest.me is the
+// local trust domain (see defaultTrustDomain) and resolves to 127.0.0.1, which
+// is what a local gateway on :8080 fronts; a real cluster's route differs, hence
+// "for example".
+func unresolvedAgentAddressHint(namespace, name string) string {
+	hint := "Hint: `agents chat` talks A2A directly to the agent, at the URL from its " +
+		"agent-card endpoint — that hostname has to resolve from here, which a " +
+		"cluster-internal one may not. Pass --address http://<route>:<port> to name a " +
+		"reachable URL."
+	if namespace == "" || name == "" {
+		return hint
+	}
+	return fmt.Sprintf("%s\nFor example: --address http://%s.%s.localtest.me:8080",
+		hint, name, namespace)
 }
 
 // agentCardURL returns the URL an agent advertises in its agent card — the same
