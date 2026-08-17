@@ -9,3 +9,7 @@ rossoctl-cli
 
 # Editor / OS
 .DS_Store
+
+# Local MLflow backing store, created in the working directory by
+# `mlflow server` — the tracing backend `rossoctl otel collect` forwards to.
+/mlflow.db

@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -259,10 +260,51 @@ func NewConfig(tracesEndpoint string) *Config {
 	}
 }
 
-// HTTPEndpoint returns the config's receivers.otlp.protocols.http.endpoint, which
-// is the value the record file carries.
+// HTTPEndpoint returns the address a client on this host uses to reach the
+// collector's OTLP HTTP receiver — the record file's httpEndpoint, and the basis of
+// the OTEL_EXPORTER_OTLP_ENDPOINT given to a child by `authbridge exec
+// --with-claude-otel`.
+//
+// The receiver's own endpoint is a *bind* address, 0.0.0.0 inside the container,
+// which is a wildcard rather than a destination: an exporter told to send to
+// http://0.0.0.0:4318 is relying on the platform to reinterpret it, which Linux
+// does and other systems need not. The published side is on loopback, so
+// unspecifiedHost is rewritten to 127.0.0.1 while the port is carried through from
+// the receiver.
+//
+// A host that is already specific is left alone, so a config edited to bind one
+// interface still reports the address that was chosen.
 func (c *Config) HTTPEndpoint() string {
-	return c.Receivers.OTLP.Protocols.HTTP.Endpoint
+	return dialableHost(c.Receivers.OTLP.Protocols.HTTP.Endpoint)
+}
+
+// unspecifiedHost is the IPv4 wildcard bind address, and unspecifiedHostV6 its
+// IPv6 counterpart. Neither is a usable destination.
+const (
+	unspecifiedHost   = "0.0.0.0"
+	unspecifiedHostV6 = "::"
+)
+
+// loopbackHost is what an unspecified bind address is reported as: the collector
+// publishes its ports on this host, so loopback is where a local client reaches it.
+const loopbackHost = "127.0.0.1"
+
+// dialableHost rewrites a wildcard host in a "host:port" address to loopback,
+// leaving the port and any specific host untouched.
+//
+// An address it cannot split is returned unchanged rather than guessed at: this
+// feeds a record file and an environment variable, and passing a malformed value
+// through unaltered keeps the eventual error about the value the user can see.
+func dialableHost(endpoint string) string {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	switch host {
+	case unspecifiedHost, unspecifiedHostV6, "":
+		return net.JoinHostPort(loopbackHost, port)
+	}
+	return endpoint
 }
 
 // Marshal renders the config as YAML.
@@ -369,9 +411,51 @@ type Record struct {
 	// ConfigFile is the generated collector config on this host.
 	ConfigFile string `yaml:"configFile"`
 
-	// HTTPEndpoint is the config's receivers.otlp.protocols.http.endpoint, as
-	// bound inside the container.
+	// HTTPEndpoint is the "host:port" a client on this host uses to reach the
+	// collector's OTLP HTTP receiver, e.g. 127.0.0.1:4318.
+	//
+	// Deliberately the dialable form rather than the receiver's own bind address:
+	// this value is read back and turned into a URL — an
+	// OTEL_EXPORTER_OTLP_ENDPOINT for a child process — and the wildcard a
+	// receiver binds is not a destination. See Config.HTTPEndpoint.
 	HTTPEndpoint string `yaml:"httpEndpoint"`
+}
+
+// ReadRecord reads the record written by `otel collect` at path.
+//
+// A missing file is reported as-is rather than as an empty Record: the only caller
+// needs the endpoint, and "no collector has been started here" is what it has to
+// tell the user, not a zero value that would become a nonsense URL.
+func ReadRecord(path string) (*Record, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rec Record
+	if err := yaml.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return &rec, nil
+}
+
+// OTLPEndpointURL renders the record's HTTPEndpoint as the base URL an OTLP
+// exporter is configured with.
+//
+// Just the scheme and authority: OTEL_EXPORTER_OTLP_ENDPOINT is a *base*, onto which
+// an SDK appends the signal path (/v1/traces), so including a path here would send
+// spans to /v1/traces/v1/traces.
+//
+// Reports an error when the record carries no endpoint, which is what a truncated or
+// hand-edited file looks like.
+func (r *Record) OTLPEndpointURL() (string, error) {
+	endpoint := strings.TrimSpace(r.HTTPEndpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("no httpEndpoint recorded")
+	}
+	// Rewritten again on read, not only on write: a record written before the
+	// wildcard was corrected, or edited by hand, would otherwise hand a child an
+	// OTEL_EXPORTER_OTLP_ENDPOINT of http://0.0.0.0:4318.
+	return "http://" + dialableHost(endpoint), nil
 }
 
 // WriteRecord writes rec as YAML to path, creating the parent directory.
@@ -389,6 +473,44 @@ func WriteRecord(path string, rec Record) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
+}
+
+// EndpointEnvVar is the variable an OTLP exporter reads for the collector's base
+// URL. Named because it is the one entry of ClaudeTelemetryEnv whose value is not
+// static.
+const EndpointEnvVar = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+// ClaudeTelemetryEnv returns the environment that makes Claude Code export traces
+// to the collector at endpointURL, as "K=V" strings sorted by name.
+//
+// Everything but the endpoint is fixed. The two CLAUDE_CODE_* variables turn
+// Claude's telemetry on; the OTEL_* ones select the transport and restrict it to
+// traces.
+//
+// http/json rather than the OTLP default of http/protobuf because the receiver this
+// points at is the one `otel collect` publishes, whose JSON path is what the rest of
+// this package exercises. Logs and metrics are switched off explicitly: the
+// generated collector config declares a traces pipeline only, so an SDK exporting
+// them would retry against a receiver that discards them.
+//
+// Sorted so the child's environment is byte-identical between runs, which keeps a
+// diff of two invocations to what actually differs.
+func ClaudeTelemetryEnv(endpointURL string) []string {
+	env := []string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1",
+		"OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
+		// Export every second rather than on the SDK's minute-scale default, so a
+		// span shows up in MLflow while the command that produced it is still on
+		// screen. Unitless: Claude Code reads this as seconds.
+		"OTEL_TRACES_EXPORT_INTERVAL=1",
+		"OTEL_TRACES_EXPORTER=otlp",
+		"OTEL_LOGS_EXPORTER=none",
+		"OTEL_METRICS_EXPORTER=none",
+		EndpointEnvVar + "=" + endpointURL,
+	}
+	slices.Sort(env)
+	return env
 }
 
 // EndpointPort returns the port named by a traces endpoint URL, supplying the

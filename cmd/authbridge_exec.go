@@ -33,6 +33,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 
 	"github.com/rossoctl/rossoctl-cli/internal/instances"
+	"github.com/rossoctl/rossoctl-cli/internal/otelcollect"
 )
 
 // execArgs holds the `authbridge exec` flags.
@@ -44,6 +45,8 @@ var execArgs struct {
 	instanceName        string
 	namespace           string
 	inboundProtocol     string
+	withClaudeOtel      bool
+	otelEndpoint        string
 }
 
 // defaultSessionServer is where the session API listens when --sessionServer is
@@ -167,6 +170,29 @@ runs. A variable already set in rossoctl's own environment is left alone. The
 reverse proxy adds nothing: it is where callers reach the command, not where the
 command sends its own traffic.
 
+--with-claude-otel additionally exports the variables that make Claude Code send
+traces to a local collector:
+
+  CLAUDE_CODE_ENABLE_TELEMETRY=1
+  CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+  OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+  OTEL_TRACES_EXPORT_INTERVAL=1
+  OTEL_TRACES_EXPORTER=otlp
+  OTEL_LOGS_EXPORTER=none
+  OTEL_METRICS_EXPORTER=none
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://<httpEndpoint>
+
+The endpoint is read from httpEndpoint in ~/.config/rossoctl/otel-config.yaml,
+which "rossoctl otel collect" writes — so the flag fails, rather than exporting a
+guess, when no collector has been started on this host. As with the proxy
+variables, one already set in rossoctl's own environment is left alone.
+
+--otel-endpoint overrides that address with a full URL (http:// or https://), for a
+collector this host did not start — one already running, or on another machine. The
+record is then not read at all, so it works with no local collector. It sets one of
+the variables --with-claude-otel turns on, so passing it alone is an error rather
+than an implied --with-claude-otel.
+
 With --proxyContainerImage the pipeline runs in a container from that image
 instead of in this process. The config is mounted read-only at /tmp/config.yaml
 and passed as --config; ports 8000, 8081, 9093, and 9094 are published on
@@ -244,6 +270,13 @@ func runCortexExec(cmd *cobra.Command, args []string) error {
 	// configured pipeline, and there is no meaningful default pipeline.
 	if execArgs.config == "" {
 		return fmt.Errorf("--config is required (a local YAML file path or an http/https URL)")
+	}
+
+	// Here rather than where the endpoint is resolved: a flag combination that
+	// cannot work should be rejected before a remote --config is fetched and the
+	// logfile is opened.
+	if err := validateClaudeOtelFlags(cmd); err != nil {
+		return err
 	}
 
 	// exec ignores the context, but an explicit --context naming one that does
@@ -398,7 +431,142 @@ func execWithPipeline(cmd *cobra.Command, argv []string) error {
 	}
 	defer unregisterInstance(cmd, rec)
 
-	return runPassthrough(cmd, argv, host.env, host.serveErr)
+	childEnvironment := host.env
+	if execArgs.withClaudeOtel {
+		childEnvironment, err = withClaudeOtelEnv(cmd, childEnvironment)
+		if err != nil {
+			return err
+		}
+	}
+
+	return runPassthrough(cmd, argv, childEnvironment, host.serveErr)
+}
+
+// claudeOtelEndpoint resolves the OTEL_EXPORTER_OTLP_ENDPOINT for the child, and
+// reports where the value came from for the --verbose line.
+//
+// --otel-endpoint wins, and when it is given the record is not read at all: naming
+// an endpoint explicitly is how a collector that `otel collect` did not start — one
+// on another host, or already running — is pointed at, and requiring a local record
+// alongside it would defeat that.
+func claudeOtelEndpoint() (endpointURL, source string, err error) {
+	if execArgs.otelEndpoint != "" {
+		return execArgs.otelEndpoint, "from --otel-endpoint", nil
+	}
+
+	recordPath, err := otelCollectRecordPath()
+	if err != nil {
+		return "", "", err
+	}
+	rec, err := otelcollect.ReadRecord(recordPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The fix is one command away, so name it rather than reporting a bare
+			// missing file for a path the user never typed. --otel-endpoint is
+			// offered too, since it is the way through without a local collector.
+			return "", "", fmt.Errorf("--with-claude-otel needs a collector: %s does not exist.\n"+
+				"Start one with `rossoctl otel collect`, or name one with --otel-endpoint", recordPath)
+		}
+		return "", "", err
+	}
+	url, err := rec.OTLPEndpointURL()
+	if err != nil {
+		return "", "", fmt.Errorf("--with-claude-otel: %s: %w", recordPath, err)
+	}
+	return url, "from " + recordPath, nil
+}
+
+// validateClaudeOtelFlags rejects --otel-endpoint without --with-claude-otel, and a
+// value that is not a full URL.
+//
+// Checked before anything is started, so a mistyped invocation fails immediately
+// rather than after the pipeline is up and the child has been launched.
+//
+// --otel-endpoint alone is an error rather than an implied --with-claude-otel: it
+// sets one variable out of the set the other flag turns on, so on its own it would
+// name an endpoint for telemetry that is switched off — almost certainly not what
+// was meant, and silently doing nothing is the worse of the two ways to handle it.
+func validateClaudeOtelFlags(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("otel-endpoint") {
+		return nil
+	}
+	if !execArgs.withClaudeOtel {
+		return fmt.Errorf("--otel-endpoint requires --with-claude-otel")
+	}
+
+	// A full URL, as OTEL_EXPORTER_OTLP_ENDPOINT itself expects.
+	//
+	// The scheme is checked by prefix *before* url.Parse, rather than reading
+	// u.Scheme afterwards, because the common mistake is a bare host:port — and
+	// url.Parse rejects that with "first path segment in URL cannot contain colon",
+	// which describes its own internals instead of telling the user to add http://.
+	// Testing the prefix first means the message names the fix.
+	endpoint := execArgs.otelEndpoint
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		return fmt.Errorf("--otel-endpoint %q must be a full URL beginning with http:// or https:// "+
+			"(for example http://127.0.0.1:%d)", endpoint, otelcollect.HTTPPort)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("--otel-endpoint %q: %w", endpoint, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("--otel-endpoint %q names no host", endpoint)
+	}
+	return nil
+}
+
+// withClaudeOtelEnv adds the Claude Code telemetry variables to env, pointing at
+// the collector recorded by `rossoctl otel collect`, or at --otel-endpoint when
+// that is given.
+//
+// env is the environment the host built, which may be nil to mean "inherit
+// rossoctl's" (see exec.Cmd.Env). A nil is expanded to the real environment first:
+// appending to it would otherwise hand the child *only* these variables, with no
+// PATH or HOME.
+//
+// An inherited variable is left alone and reported, matching how childEnv treats
+// the proxy and CA settings — someone who exported OTEL_EXPORTER_OTLP_ENDPOINT
+// before running this has said where they want spans to go.
+func withClaudeOtelEnv(cmd *cobra.Command, env []string) ([]string, error) {
+	errOut := cmd.ErrOrStderr()
+
+	endpointURL, source, err := claudeOtelEndpoint()
+	if err != nil {
+		return nil, err
+	}
+
+	if env == nil {
+		env = os.Environ()
+	}
+
+	// Index what is already present by name, so an inherited setting can be
+	// detected without depending on how the slice was ordered.
+	present := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			present[k] = v
+		}
+	}
+
+	for _, kv := range otelcollect.ClaudeTelemetryEnv(endpointURL) {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if existing, taken := present[k]; taken {
+			if existing != v {
+				fmt.Fprintf(errOut, "keeping inherited %s=%s (not overriding with %s)\n", k, existing, v)
+			}
+			continue
+		}
+		env = append(env, kv)
+	}
+
+	if verbose {
+		fmt.Fprintf(errOut, "Claude Code telemetry -> %s (%s)\n", endpointURL, source)
+	}
+	return env, nil
 }
 
 // instanceName returns the name to record for this run: --instanceName when
@@ -1554,6 +1722,10 @@ func init() {
 		"namespace to record this instance in; defaults to the current context's namespace, or \""+instances.DefaultNamespace+"\"")
 	f.StringVar(&execArgs.inboundProtocol, "inboundProtocol", string(instances.DefaultProtocol),
 		`protocol the inbound listener fronts, recorded in the instance file: "a2a" or "mcp"`)
+	f.BoolVar(&execArgs.withClaudeOtel, "with-claude-otel", false,
+		"give the command Claude Code telemetry variables pointing at the collector recorded by `rossoctl otel collect`")
+	f.StringVar(&execArgs.otelEndpoint, "otel-endpoint", "",
+		"full URL for OTEL_EXPORTER_OTLP_ENDPOINT, replacing the recorded collector address (requires --with-claude-otel)")
 
 	// The authbridge group deliberately has no --cortex flag. exec is configured
 	// entirely by --config and never resolves a context, so the flag it used to

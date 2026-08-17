@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -144,11 +145,51 @@ func TestNewConfigServicePipeline(t *testing.T) {
 	}
 }
 
-// TestHTTPEndpoint verifies the accessor reports the receiver endpoint the record
-// file carries, rather than the gRPC one beside it.
+// TestHTTPEndpoint verifies the accessor reports an address a client can dial,
+// rather than the wildcard the receiver binds.
+//
+// The rewrite is the point. receivers.otlp.protocols.http.endpoint is 0.0.0.0:4318
+// — correct as a bind address inside the container, and useless as a destination:
+// this value becomes an OTEL_EXPORTER_OTLP_ENDPOINT, and an exporter told to send to
+// http://0.0.0.0:4318 depends on the platform reinterpreting it. The port must
+// still come from the receiver rather than being restated here.
 func TestHTTPEndpoint(t *testing.T) {
-	if got := NewConfig(DefaultTracesEndpoint).HTTPEndpoint(); got != "0.0.0.0:4318" {
-		t.Errorf("HTTPEndpoint() = %q, want 0.0.0.0:4318", got)
+	cfg := NewConfig(DefaultTracesEndpoint)
+	if got, want := cfg.HTTPEndpoint(), "127.0.0.1:"+strconv.Itoa(HTTPPort); got != want {
+		t.Errorf("HTTPEndpoint() = %q, want %q", got, want)
+	}
+	// The config itself keeps binding the wildcard: a container's loopback is
+	// reachable only from inside it, so a receiver bound there would refuse every
+	// connection arriving through the published port.
+	if got := cfg.Receivers.OTLP.Protocols.HTTP.Endpoint; got != "0.0.0.0:"+strconv.Itoa(HTTPPort) {
+		t.Errorf("receiver endpoint = %q, want the wildcard bind address unchanged", got)
+	}
+}
+
+// TestDialableHost verifies which hosts are rewritten and which are preserved.
+func TestDialableHost(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{"ipv4 wildcard", "0.0.0.0:4318", "127.0.0.1:4318"},
+		{"ipv6 wildcard", "[::]:4318", "127.0.0.1:4318"},
+		{"host omitted", ":4318", "127.0.0.1:4318"},
+		// A config edited to bind one interface still reports what was chosen.
+		{"specific host", "192.168.1.5:4318", "192.168.1.5:4318"},
+		{"loopback already", "127.0.0.1:4318", "127.0.0.1:4318"},
+		{"named host", "localhost:4318", "localhost:4318"},
+		// Not splittable, so returned unchanged rather than guessed at: the eventual
+		// error should name the value the user can see.
+		{"no port", "0.0.0.0", "0.0.0.0"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dialableHost(tc.endpoint); got != tc.want {
+				t.Errorf("dialableHost(%q) = %q, want %q", tc.endpoint, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -369,7 +410,7 @@ func TestWriteRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", RecordName)
 	rec := Record{
 		ConfigFile:   "/home/u/.config/rossoctl/otel/collector-20260817-143045.yaml",
-		HTTPEndpoint: "0.0.0.0:4318",
+		HTTPEndpoint: "127.0.0.1:4318",
 	}
 	if err := WriteRecord(path, rec); err != nil {
 		t.Fatalf("WriteRecord: %v", err)
@@ -767,5 +808,148 @@ func TestSendTraceUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), url) {
 		t.Errorf("error = %v, want it to name %q", err, url)
+	}
+}
+
+// TestReadRecordRoundTrip verifies a written record reads back unchanged.
+func TestReadRecordRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), RecordName)
+	want := Record{ConfigFile: "/home/u/.config/rossoctl/otel/c.yaml", HTTPEndpoint: "127.0.0.1:4318"}
+	if err := WriteRecord(path, want); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+
+	got, err := ReadRecord(path)
+	if err != nil {
+		t.Fatalf("ReadRecord: %v", err)
+	}
+	if *got != want {
+		t.Errorf("ReadRecord = %+v, want %+v", *got, want)
+	}
+}
+
+// TestReadRecordMissing verifies a missing file is reported as such, so a caller can
+// tell "no collector started here" from a parse failure.
+func TestReadRecordMissing(t *testing.T) {
+	_, err := ReadRecord(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err == nil {
+		t.Fatal("expected an error for a missing record")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("error = %v, want one that satisfies os.IsNotExist", err)
+	}
+}
+
+// TestReadRecordMalformed verifies unparseable YAML is an error naming the file.
+func TestReadRecordMalformed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), RecordName)
+	if err := os.WriteFile(path, []byte("httpEndpoint: [unclosed\n"), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	_, err := ReadRecord(path)
+	if err == nil {
+		t.Fatal("expected an error for malformed YAML")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error = %v, want it to name %q", err, path)
+	}
+}
+
+// TestOTLPEndpointURL verifies the URL handed to an exporter.
+//
+// The no-path assertion is the substance: OTEL_EXPORTER_OTLP_ENDPOINT is a base URL
+// onto which an SDK appends the signal path, so a "/v1/traces" here would send spans
+// to /v1/traces/v1/traces.
+func TestOTLPEndpointURL(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{"loopback", "127.0.0.1:4318", "http://127.0.0.1:4318"},
+		// A record written before the wildcard was corrected, or edited by hand, is
+		// rewritten on read rather than passed through as a useless destination.
+		{"wildcard is rewritten", "0.0.0.0:4318", "http://127.0.0.1:4318"},
+		{"ipv6 wildcard is rewritten", "[::]:4318", "http://127.0.0.1:4318"},
+		{"specific host preserved", "192.168.1.5:4318", "http://192.168.1.5:4318"},
+		{"surrounding whitespace", "  127.0.0.1:4318\n", "http://127.0.0.1:4318"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := (&Record{HTTPEndpoint: tc.endpoint}).OTLPEndpointURL()
+			if err != nil {
+				t.Fatalf("OTLPEndpointURL: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("OTLPEndpointURL() = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(strings.TrimPrefix(got, "http://"), "/") {
+				t.Errorf("OTLPEndpointURL() = %q, want no path: an SDK appends the signal path", got)
+			}
+		})
+	}
+}
+
+// TestOTLPEndpointURLEmpty verifies a record with no endpoint is an error rather than
+// yielding the nonsense URL "http://".
+func TestOTLPEndpointURLEmpty(t *testing.T) {
+	for _, endpoint := range []string{"", "   "} {
+		if _, err := (&Record{HTTPEndpoint: endpoint}).OTLPEndpointURL(); err == nil {
+			t.Errorf("OTLPEndpointURL() with %q succeeded; want an error", endpoint)
+		}
+	}
+}
+
+// TestClaudeTelemetryEnv verifies the exact set of variables, including the endpoint.
+func TestClaudeTelemetryEnv(t *testing.T) {
+	got := ClaudeTelemetryEnv("http://127.0.0.1:4318")
+
+	want := []string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1",
+		"OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318",
+		"OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
+		"OTEL_LOGS_EXPORTER=none",
+		"OTEL_METRICS_EXPORTER=none",
+		"OTEL_TRACES_EXPORTER=otlp",
+		"OTEL_TRACES_EXPORT_INTERVAL=1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d variables, want %d:\n%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("variable %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestClaudeTelemetryEnvIsSorted verifies the output is sorted, so a child's
+// environment is byte-identical between runs.
+func TestClaudeTelemetryEnvIsSorted(t *testing.T) {
+	got := ClaudeTelemetryEnv("http://127.0.0.1:4318")
+	if !slices.IsSorted(got) {
+		t.Errorf("ClaudeTelemetryEnv is not sorted: %v", got)
+	}
+}
+
+// TestClaudeTelemetryEnvNamesAreUnique verifies no variable is set twice, which would
+// leave which one wins up to the receiving process.
+func TestClaudeTelemetryEnvNamesAreUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, kv := range ClaudeTelemetryEnv("http://127.0.0.1:4318") {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Errorf("%q is not a K=V pair", kv)
+			continue
+		}
+		if seen[k] {
+			t.Errorf("%s is set more than once", k)
+		}
+		seen[k] = true
+	}
+	// EndpointEnvVar must be one of them, since it is the name the caller checks
+	// against the inherited environment.
+	if !seen[EndpointEnvVar] {
+		t.Errorf("%s is not among the variables", EndpointEnvVar)
 	}
 }

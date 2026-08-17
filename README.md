@@ -68,6 +68,35 @@ forward proxy, plus `HTTPS_PROXY` and the CA trust variables
 bridge runs. Variables already set in your environment are left alone. Everything
 is shut down when the command exits or on SIGINT/SIGTERM.
 
+`--with-claude-otel` additionally exports the variables that make Claude Code send
+traces to the local collector — `CLAUDE_CODE_ENABLE_TELEMETRY=1`,
+`CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`,
+`OTEL_TRACES_EXPORT_INTERVAL=1`, `OTEL_TRACES_EXPORTER=otlp`,
+`OTEL_LOGS_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, and
+`OTEL_EXPORTER_OTLP_ENDPOINT` built from `httpEndpoint` in
+`~/.config/rossoctl/otel-config.yaml`:
+
+```sh
+rossoctl otel collect                      # writes otel-config.yaml
+rossoctl authbridge exec --with-claude-otel --config ./authbridge.yaml -- claude
+```
+
+It reads that record rather than assuming a port, so it fails — naming
+`rossoctl otel collect` — when no collector has been started on this host, instead
+of pointing the command at an endpoint that is not listening.
+
+`--otel-endpoint` overrides that address with a full URL, for a collector this host
+did not start. The record is then not read at all, so it needs no local collector:
+
+```sh
+rossoctl authbridge exec --with-claude-otel \
+    --otel-endpoint https://otel.example.com:4318 --config ./authbridge.yaml -- claude
+```
+
+The value must begin with `http://` or `https://`, and it sets one of the variables
+`--with-claude-otel` turns on — so passing it without that flag is an error rather
+than an implied opt-in.
+
 Authbridge's own log output goes to `--logfile` (default `/tmp/authbridge.log`)
 rather than stderr, so it does not interleave with the hosted command's output.
 The path is printed at startup; pass `--logfile ""` to log to stderr instead.
@@ -273,9 +302,11 @@ rossoctl otel collect --traces_endpoint http://host.containers.internal:5002/v1/
 # Both flags matter: MLflow otherwise binds loopback, which a container cannot
 # reach, and rejects requests whose Host header is host.containers.internal.
 #
-# The generated config's path and the receiver's HTTP endpoint are recorded in
-# ~/.config/rossoctl/otel-config.yaml. The container runs detached; stop it with
-# `podman stop` (or `docker stop`) using the name printed on start.
+# The generated config's path and the address a client uses to reach the receiver
+# (httpEndpoint: 127.0.0.1:4318 — the dialable form, not the 0.0.0.0 the receiver
+# binds inside the container) are recorded in ~/.config/rossoctl/otel-config.yaml.
+# The container runs detached; stop it with `podman stop` (or `docker stop`) using
+# the name printed on start.
 
 # Send one mock span to that collector, to check the path from here to MLflow
 # without an instrumented workload. Random trace and span IDs each run, so every

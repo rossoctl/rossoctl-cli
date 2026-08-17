@@ -154,8 +154,11 @@ func TestOtelCollectRunsContainer(t *testing.T) {
 	if rec.ConfigFile != cfgPath {
 		t.Errorf("record configFile = %q, want %q", rec.ConfigFile, cfgPath)
 	}
-	if rec.HTTPEndpoint != "0.0.0.0:"+strconv.Itoa(otelcollect.HTTPPort) {
-		t.Errorf("record httpEndpoint = %q, want the receiver's HTTP endpoint", rec.HTTPEndpoint)
+	// The dialable address, not the wildcard the receiver binds: this value is read
+	// back and turned into a URL (an OTEL_EXPORTER_OTLP_ENDPOINT), and
+	// http://0.0.0.0:4318 is not a destination.
+	if rec.HTTPEndpoint != "127.0.0.1:"+strconv.Itoa(otelcollect.HTTPPort) {
+		t.Errorf("record httpEndpoint = %q, want the loopback address a client dials", rec.HTTPEndpoint)
 	}
 
 	// The stop instruction has to name the container, since the run is detached
