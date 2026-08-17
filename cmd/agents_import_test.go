@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -544,6 +546,270 @@ func TestAgentsImportCreateHTTPRouteExplicitFalse(t *testing.T) {
 	}
 	if got != false {
 		t.Errorf("createHttpRoute = %v, want false", got)
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSON verifies an inline dict reaches the
+// request body alongside the fields the flags set.
+func TestAgentsImportAdditionalParameterJSON(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", `{"serviceAccount":"orders-sa","replicas":3}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if body["serviceAccount"] != "orders-sa" {
+		t.Errorf("serviceAccount = %v, want orders-sa", body["serviceAccount"])
+	}
+	// JSON numbers decode to float64 on this side of the wire; the value is what
+	// matters, not the Go type the test's decoder chose.
+	if body["replicas"] != float64(3) {
+		t.Errorf("replicas = %#v, want 3", body["replicas"])
+	}
+	// The flags' own fields must survive the overlay.
+	if body["name"] != "orders" || body["containerImage"] != "img" {
+		t.Errorf("flag-set fields lost: %+v", body)
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONFromFile verifies a value naming a file
+// sends that file's contents.
+func TestAgentsImportAdditionalParameterJSONFromFile(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	path := filepath.Join(t.TempDir(), "extra.json")
+	if err := os.WriteFile(path, []byte(`{"nodeSelector":{"disktype":"ssd"}}`), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", path); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	selector, ok := body["nodeSelector"].(map[string]any)
+	if !ok {
+		t.Fatalf("nodeSelector = %#v, want an object", body["nodeSelector"])
+	}
+	if selector["disktype"] != "ssd" {
+		t.Errorf("nodeSelector = %#v, want disktype ssd", selector)
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONRepeatedMerges verifies repeating the
+// flag merges the dicts, with a later value winning a shared key.
+func TestAgentsImportAdditionalParameterJSONRepeatedMerges(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	path := filepath.Join(t.TempDir(), "base.json")
+	if err := os.WriteFile(path, []byte(`{"fromFile":true,"shared":"file"}`), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", path,
+		"--additionalParameterJSON", `{"shared":"inline","fromFlag":true}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if body["fromFile"] != true || body["fromFlag"] != true {
+		t.Errorf("both dicts should contribute: %+v", body)
+	}
+	if body["shared"] != "inline" {
+		t.Errorf("shared = %v, want inline (the later value wins)", body["shared"])
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONOverridesFlags verifies a key naming a
+// field the CLI already sets replaces it.
+//
+// The createHttpRoute case is the one worth pinning: it is a bool with no
+// omitempty, so it is always present in the encoded request. Overriding it proves
+// the overlay replaces a member that is already there rather than only filling in
+// absent ones.
+func TestAgentsImportAdditionalParameterJSONOverridesFlags(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON",
+		`{"containerImage":"override:1","workloadType":"job","createHttpRoute":true}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if body["containerImage"] != "override:1" {
+		t.Errorf("containerImage = %v, want the additional JSON to win", body["containerImage"])
+	}
+	if body["workloadType"] != "job" {
+		t.Errorf("workloadType = %v, want job", body["workloadType"])
+	}
+	if body["createHttpRoute"] != true {
+		t.Errorf("createHttpRoute = %v, want true from the additional JSON", body["createHttpRoute"])
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONOverridesPersistentStorage verifies the
+// overlay also beats a field assigned after the request literal is built.
+//
+// --storage-size is set on the struct in a later statement than
+// AdditionalParameters, so a naive implementation that merged at construction
+// time would have this one field escape the overlay.
+func TestAgentsImportAdditionalParameterJSONOverridesPersistentStorage(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "--deployment-type", "statefulset", "from-image",
+		"--name", "orders", "--containerImage", "img", "--storage-size", "5Gi",
+		"--additionalParameterJSON", `{"persistentStorage":{"enabled":true,"size":"20Gi"}}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	storage, ok := body["persistentStorage"].(map[string]any)
+	if !ok {
+		t.Fatalf("persistentStorage = %#v, want an object", body["persistentStorage"])
+	}
+	if storage["size"] != "20Gi" {
+		t.Errorf("persistentStorage size = %v, want 20Gi from the additional JSON", storage["size"])
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONInvalid verifies a malformed value fails
+// the command and sends nothing.
+//
+// The no-request assertion is the substance, exactly as for --envVar: parsing
+// after the client call would still return an error while having already created
+// the agent.
+func TestAgentsImportAdditionalParameterJSONInvalid(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	_, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", `{"a":`)
+	if err == nil {
+		t.Fatal("expected an error for a truncated dict")
+	}
+	if !strings.Contains(err.Error(), "additionalParameterJSON") {
+		t.Errorf("error should name the flag: %v", err)
+	}
+	if body != nil {
+		t.Errorf("no agent should have been created, but the server received %+v", body)
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONAbsent verifies the request body is
+// unchanged when the flag is not used.
+//
+// The unknown-key check is the point: an implementation that always merged
+// through a map could introduce a stray key (an empty overlay object, say), and a
+// server rejecting unknown fields would start failing imports that never asked
+// for this feature.
+func TestAgentsImportAdditionalParameterJSONAbsent(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	known := map[string]bool{
+		"name": true, "namespace": true, "deploymentMethod": true, "workloadType": true,
+		"envVars": true, "persistentStorage": true, "containerImage": true,
+		"imagePullSecret": true, "gitUrl": true, "gitPath": true, "gitBranch": true,
+		"createHttpRoute": true,
+	}
+	for k := range body {
+		if !known[k] {
+			t.Errorf("unexpected key %q in a request with no --additionalParameterJSON: %+v", k, body)
+		}
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONFlagSurface verifies both subcommands
+// document the flag and that it is a string array.
+//
+// The type assertion matters here more than for --envVar: a StringSlice would
+// split an inline dict on its commas, so '{"a":1,"b":2}' would arrive as the two
+// fragments '{"a":1' and 'b":2}', neither of which is JSON.
+func TestAgentsImportAdditionalParameterJSONFlagSurface(t *testing.T) {
+	isolateHome(t)
+	for _, sub := range []string{"from-image", "from-source"} {
+		out, err := execute(t, "agents", "import", sub, "--help")
+		if err != nil {
+			t.Errorf("%s --help: %v", sub, err)
+			continue
+		}
+		if !strings.Contains(out, "--additionalParameterJSON") {
+			t.Errorf("%s --help does not document --additionalParameterJSON:\n%s", sub, out)
+		}
+
+		cmd, _, err := rootCmd.Find([]string{"agents", "import", sub})
+		if err != nil {
+			t.Fatalf("could not find %s: %v", sub, err)
+		}
+		f := cmd.InheritedFlags().Lookup("additionalParameterJSON")
+		if f == nil {
+			t.Fatalf("%s does not inherit --additionalParameterJSON", sub)
+		}
+		if f.Value.Type() != "stringArray" {
+			t.Errorf("%s --additionalParameterJSON is a %s; it must be a stringArray, or inline dicts are CSV-split",
+				sub, f.Value.Type())
+		}
+	}
+}
+
+// TestAgentsImportAdditionalParameterJSONAcrossRuns verifies flag state does not
+// leak between two runs in one process, as TestAgentsImportEnvVarIsRepeatableAcrossRuns
+// does for --envVar; the same nil-default reasoning applies.
+func TestAgentsImportAdditionalParameterJSONAcrossRuns(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newImportServer(t, &body)
+	setupImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", `{"first":true}`); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if body["first"] != true {
+		t.Fatalf("first run did not send its dict: %+v", body)
+	}
+
+	body = nil
+	if _, err := execute(t, "agents", "import", "from-image",
+		"--name", "orders", "--containerImage", "img",
+		"--additionalParameterJSON", `{"second":true}`); err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if _, leaked := body["first"]; leaked {
+		t.Errorf("the first run's dict leaked into the second: %+v", body)
+	}
+	if body["second"] != true {
+		t.Errorf("second run did not send its dict: %+v", body)
 	}
 }
 

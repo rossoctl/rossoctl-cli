@@ -664,3 +664,165 @@ func TestStatusErrorUsesStatusLineWhenBodyEmpty(t *testing.T) {
 		t.Error("Body is empty; want the status line as a fallback")
 	}
 }
+
+// TestCreateRequestAdditionalParametersOverlay verifies AdditionalParameters are
+// merged into the encoded request as top-level members, winning over the struct's
+// own fields.
+//
+// Both request types are covered in one table because their marshalers differ only
+// in which struct is encoded.
+func TestCreateRequestAdditionalParametersOverlay(t *testing.T) {
+	additional := map[string]any{
+		// Replaces a field the struct populates.
+		"containerImage": "override:1",
+		// Sets a field tagged omitempty, which the struct left absent.
+		"gitBranch": "release",
+		// Replaces a bool that has no omitempty, so it is present either way.
+		"createHttpRoute": true,
+		// A member the struct has no field for at all.
+		"serviceAccount": "sa",
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  any
+	}{
+		{"agent", CreateAgentRequest{
+			Name: "a", Namespace: "team1", DeploymentMethod: "image", WorkloadType: "deployment",
+			ContainerImage: "img", AdditionalParameters: additional,
+		}},
+		{"tool", CreateToolRequest{
+			Name: "a", Namespace: "team1", DeploymentMethod: "image", WorkloadType: "deployment",
+			ContainerImage: "img", AdditionalParameters: additional,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if got["containerImage"] != "override:1" {
+				t.Errorf("containerImage = %v, want the overlay to win", got["containerImage"])
+			}
+			if got["gitBranch"] != "release" {
+				t.Errorf("gitBranch = %v, want release (an omitted field can be set)", got["gitBranch"])
+			}
+			if got["createHttpRoute"] != true {
+				t.Errorf("createHttpRoute = %v, want true", got["createHttpRoute"])
+			}
+			if got["serviceAccount"] != "sa" {
+				t.Errorf("serviceAccount = %v, want sa", got["serviceAccount"])
+			}
+			// Fields the overlay did not name are untouched.
+			if got["name"] != "a" || got["workloadType"] != "deployment" {
+				t.Errorf("unrelated fields changed: %+v", got)
+			}
+			// The map itself must never appear as a member: it is tagged json:"-",
+			// and a nested "AdditionalParameters" object would be a field no server
+			// knows.
+			if _, present := got["AdditionalParameters"]; present {
+				t.Errorf("the overlay map leaked in as a member: %+v", got)
+			}
+		})
+	}
+}
+
+// TestCreateRequestWithoutAdditionalParametersIsUnchanged verifies a request that
+// does not use the feature encodes exactly as it did before it existed.
+//
+// Byte comparison against the same struct marshaled through the alias type is the
+// assertion: it catches the overlay path being taken for an empty map, which would
+// reorder keys and could add a member, and would break a server that rejects
+// unknown fields for callers who never asked for any of this.
+func TestCreateRequestWithoutAdditionalParametersIsUnchanged(t *testing.T) {
+	agent := CreateAgentRequest{
+		Name: "a", Namespace: "team1", DeploymentMethod: "image", WorkloadType: "deployment",
+		ContainerImage: "img", EnvVars: []EnvVar{{Name: "FOO", Value: "bar"}},
+	}
+	type plainAgent CreateAgentRequest
+	want, err := json.Marshal(plainAgent(agent))
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+	got, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("encoding changed with no additional parameters:\n got %s\nwant %s", got, want)
+	}
+
+	tool := CreateToolRequest{
+		Name: "a", Namespace: "team1", DeploymentMethod: "image", WorkloadType: "deployment",
+		ContainerImage: "img", ServicePorts: []CreateServicePort{{Name: "http", Port: 1, TargetPort: 1, Protocol: "TCP"}},
+	}
+	type plainTool CreateToolRequest
+	wantTool, err := json.Marshal(plainTool(tool))
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+	gotTool, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(gotTool) != string(wantTool) {
+		t.Errorf("encoding changed with no additional parameters:\n got %s\nwant %s", gotTool, wantTool)
+	}
+}
+
+// TestCreateRequestAdditionalParametersThroughPointer verifies the overlay applies
+// when the request is marshaled as a pointer, which is how both client methods
+// send it.
+//
+// Not redundant with the value-receiver tests above: a value-receiver MarshalJSON
+// is in a pointer's method set, but the reverse is not true, so a marshaler
+// written on *CreateAgentRequest would silently do nothing for a value and one on
+// the value works for both. This pins the direction the callers actually use.
+func TestCreateRequestAdditionalParametersThroughPointer(t *testing.T) {
+	data, err := json.Marshal(&CreateAgentRequest{
+		Name: "a", ContainerImage: "img",
+		AdditionalParameters: map[string]any{"containerImage": "override:1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["containerImage"] != "override:1" {
+		t.Errorf("containerImage = %v, want the overlay applied through the pointer", got["containerImage"])
+	}
+}
+
+// TestCreateAgentSendsAdditionalParameters verifies the overlay survives the real
+// POST path, not just a direct json.Marshal.
+func TestCreateAgentSendsAdditionalParameters(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"success": true}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/api/v1/"}
+	if _, err := c.CreateAgent(context.Background(), &CreateAgentRequest{
+		Name: "a", Namespace: "team1", DeploymentMethod: "image", WorkloadType: "deployment",
+		ContainerImage:       "img",
+		AdditionalParameters: map[string]any{"replicas": 3, "containerImage": "override:1"},
+	}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	if gotBody["replicas"] != float64(3) {
+		t.Errorf("replicas = %#v, want 3", gotBody["replicas"])
+	}
+	if gotBody["containerImage"] != "override:1" {
+		t.Errorf("containerImage = %v, want the overlay to win on the wire", gotBody["containerImage"])
+	}
+}

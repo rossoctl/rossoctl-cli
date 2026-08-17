@@ -23,6 +23,19 @@ var importDeploymentType string
 // reason behind it.
 var importCreateHTTPRoute bool
 
+// importAdditionalParameterJSON backs the persistent, repeatable
+// --additionalParameterJSON flag on the import group. Each value is a JSON dict
+// or the name of a file containing one; all of them are merged and overlaid onto
+// the request body. See loadAdditionalParameters.
+//
+// Persistent, like the two flags above, because reaching a backend field the CLI
+// has no flag for is not specific to how the agent was built.
+//
+// A StringArray with a nil default, for the reasons given for --envVar below: a
+// JSON document routinely contains commas and quotes, which a StringSlice would
+// split or reject outright, and a non-nil slice default leaks between tests.
+var importAdditionalParameterJSON []string
+
 // newAgentsImportCmd builds the `agents import` command and its two
 // subcommands, `from-image` and `from-source`.
 //
@@ -36,6 +49,8 @@ func newAgentsImportCmd() *cobra.Command {
 		"workload type for the agent: deployment|statefulset|job|sandbox")
 	importCmd.PersistentFlags().BoolVar(&importCreateHTTPRoute, "createHttpRoute", false,
 		"create an HTTPRoute exposing the agent")
+	importCmd.PersistentFlags().StringArrayVar(&importAdditionalParameterJSON, additionalParameterFlagName, nil,
+		"JSON dict, or a file containing one, merged into the request body (repeatable; later values and these keys win)")
 
 	importCmd.AddCommand(
 		newAgentsImportFromImageCmd(),
@@ -64,7 +79,13 @@ current context's namespace. --deployment-type selects the workload type.
 
 Env vars come from --envVarsURL (a document of newline-separated key=value
 pairs) and from --envVar key=value, which may be repeated. When both name the
-same variable, --envVar wins, whatever order the flags appear in.`,
+same variable, --envVar wins, whatever order the flags appear in.
+
+--additionalParameterJSON sends request fields this command has no flag for. Its
+value is either a JSON dict or the name of a file containing one, and the flag
+may be repeated; all of the dicts are merged, a later one winning for a key they
+share, and the result is overlaid onto the request body. A key that names a field
+the flags above already set replaces it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if name == "" {
@@ -94,6 +115,13 @@ same variable, --envVar wins, whatever order the flags appear in.`,
 			// fetched document for the same name.
 			envVars := mergeEnvVars(docEnvVars, flagEnvVars)
 
+			// Before newClient, like the env-var parsing above: a malformed dict or
+			// an unreadable file must fail without having created the agent.
+			additional, err := loadAdditionalParameters(importAdditionalParameterJSON)
+			if err != nil {
+				return err
+			}
+
 			client, err := newClient(cmd)
 			if err != nil {
 				return err
@@ -107,6 +135,11 @@ same variable, --envVar wins, whatever order the flags appear in.`,
 				ImagePullSecret:  imagePullSecret,
 				EnvVars:          envVars,
 				CreateHTTPRoute:  importCreateHTTPRoute,
+
+				// Set last, but applied last as well: the overlay happens when the
+				// request is marshaled, so it wins over every field above — including
+				// PersistentStorage, assigned after this literal.
+				AdditionalParameters: additional,
 			}
 			if storageSize != "" {
 				request.PersistentStorage = &apiclient.PersistentStorageConfig{

@@ -25,6 +25,12 @@ var toolsImportDeploymentType string
 // reason behind it.
 var toolsImportCreateHTTPRoute bool
 
+// toolsImportAdditionalParameterJSON backs the persistent, repeatable
+// --additionalParameterJSON flag on the tools import group, mirroring the agents
+// one; see importAdditionalParameterJSON in agents_import.go for why it is
+// persistent and a nil-defaulted StringArray.
+var toolsImportAdditionalParameterJSON []string
+
 // newToolsImportCmd builds the `tools import` command and its two subcommands,
 // `from-image` and `from-source`, mirroring `agents import`.
 //
@@ -39,6 +45,8 @@ func newToolsImportCmd() *cobra.Command {
 		"workload type for the tool: deployment|statefulset")
 	importCmd.PersistentFlags().BoolVar(&toolsImportCreateHTTPRoute, "createHttpRoute", false,
 		"create an HTTPRoute exposing the tool")
+	importCmd.PersistentFlags().StringArrayVar(&toolsImportAdditionalParameterJSON, additionalParameterFlagName, nil,
+		"JSON dict, or a file containing one, merged into the request body (repeatable; later values and these keys win)")
 
 	importCmd.AddCommand(
 		newToolsImportFromImageCmd(),
@@ -70,7 +78,13 @@ current context's namespace. --deployment-type selects the workload type.
 
 Env vars come from --envVarsURL (a document of newline-separated key=value
 pairs) and from --envVar key=value, which may be repeated. When both name the
-same variable, --envVar wins, whatever order the flags appear in.`,
+same variable, --envVar wins, whatever order the flags appear in.
+
+--additionalParameterJSON sends request fields this command has no flag for. Its
+value is either a JSON dict or the name of a file containing one, and the flag
+may be repeated; all of the dicts are merged, a later one winning for a key they
+share, and the result is overlaid onto the request body. A key that names a field
+the flags above already set replaces it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if name == "" {
@@ -102,6 +116,13 @@ same variable, --envVar wins, whatever order the flags appear in.`,
 				return err
 			}
 
+			// Before newClient, like the parsing above: a malformed dict or an
+			// unreadable file must fail without having created the tool.
+			additional, err := loadAdditionalParameters(toolsImportAdditionalParameterJSON)
+			if err != nil {
+				return err
+			}
+
 			client, err := newClient(cmd)
 			if err != nil {
 				return err
@@ -116,6 +137,10 @@ same variable, --envVar wins, whatever order the flags appear in.`,
 				EnvVars:          envVars,
 				ServicePorts:     servicePorts,
 				CreateHTTPRoute:  toolsImportCreateHTTPRoute,
+
+				// Applied when the request is marshaled, so it wins over every field
+				// above.
+				AdditionalParameters: additional,
 			})
 			if err != nil {
 				return err

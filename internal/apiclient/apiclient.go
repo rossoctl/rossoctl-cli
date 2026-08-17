@@ -565,6 +565,46 @@ type PersistentStorageConfig struct {
 	Size    string `json:"size"`
 }
 
+// marshalWithAdditional encodes req and overlays additional onto the resulting
+// JSON object, with additional winning for a name they share.
+//
+// Shared by the create-agent and create-tool requests, whose --additionalParameterJSON
+// support differs only in which struct is being encoded.
+//
+// With no additional parameters the encoding of req is returned untouched, so a
+// request that does not use the feature is byte-identical to one from before it
+// existed — no key reordering, and no empty object where a nil map was.
+//
+// A req that does not encode to a JSON object would be a programming error here
+// (both callers pass a struct), but it is reported rather than assumed: silently
+// discarding an overlay the caller asked for is the worse failure.
+func marshalWithAdditional(req any, additional map[string]any) ([]byte, error) {
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if len(additional) == 0 {
+		return encoded, nil
+	}
+
+	// Decoded into map[string]json.RawMessage rather than map[string]any so the
+	// fields this struct did populate keep their exact encoding: a round trip
+	// through any would turn every number into a float64 and re-render it, so an
+	// int64 too large for a float would come back changed.
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &merged); err != nil {
+		return nil, fmt.Errorf("request body is not a JSON object: %w", err)
+	}
+	for k, v := range additional {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("encoding additional parameter %q: %w", k, err)
+		}
+		merged[k] = raw
+	}
+	return json.Marshal(merged)
+}
+
 // CreateAgentRequest is the subset of the backend's CreateAgentRequest that
 // the CLI populates. Fields the server defaults are omitted; only what we set
 // is sent. deploymentMethod selects image vs source; workloadType selects
@@ -595,6 +635,31 @@ type CreateAgentRequest struct {
 	// default agrees today, but sending what the caller asked for should not
 	// depend on the two staying in agreement.
 	CreateHTTPRoute bool `json:"createHttpRoute"`
+
+	// AdditionalParameters are extra top-level members overlaid onto the request
+	// body, letting a caller reach a backend field this struct has no name for.
+	// See MarshalJSON, which applies them; the `json:"-"` keeps the map itself
+	// from being sent as a nested object under some field name.
+	AdditionalParameters map[string]any `json:"-"`
+}
+
+// MarshalJSON encodes the request and then overlays AdditionalParameters onto
+// the resulting object, so an entry named after one of the fields above replaces
+// it and an entry naming anything else is added.
+//
+// The overlay is on the encoded form rather than the struct because that is the
+// only place the JSON names exist: a caller supplies "containerImage", not
+// ContainerImage. It is also what makes the omitempty fields overridable — a key
+// this struct omitted is simply absent from the object, so setting it is the
+// same operation as replacing one that is present.
+//
+// The alias type is what keeps this from recursing: CreateAgentRequest's method
+// set includes MarshalJSON, so marshaling the receiver directly would call this
+// function again. A defined type with the same underlying struct has no methods,
+// so encoding/json falls back to its usual struct encoding for the fields.
+func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
+	type plain CreateAgentRequest
+	return marshalWithAdditional(plain(r), r.AdditionalParameters)
 }
 
 // CreateAgentResponse mirrors the backend's CreateAgentResponse model.
@@ -695,6 +760,18 @@ type CreateToolRequest struct {
 	// named field on CreateAgentRequest: a false bool is indistinguishable from
 	// an absent one, so omitempty would drop an explicit --createHttpRoute=false.
 	CreateHTTPRoute bool `json:"createHttpRoute"`
+
+	// AdditionalParameters are extra top-level members overlaid onto the request
+	// body, as on CreateAgentRequest. See MarshalJSON below.
+	AdditionalParameters map[string]any `json:"-"`
+}
+
+// MarshalJSON overlays AdditionalParameters onto the encoded request, exactly as
+// CreateAgentRequest.MarshalJSON does; see that method for why the overlay
+// happens after encoding and why the alias type is required.
+func (r CreateToolRequest) MarshalJSON() ([]byte, error) {
+	type plain CreateToolRequest
+	return marshalWithAdditional(plain(r), r.AdditionalParameters)
 }
 
 // CreateToolResponse mirrors the backend's CreateToolResponse model.

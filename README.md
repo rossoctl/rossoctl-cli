@@ -202,6 +202,18 @@ rossoctl agents import --deployment-type sandbox from-image \
 # over --envVarsURL, whichever order the flags appear in.
 rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:latest \
     --envVar LOG_LEVEL=debug --envVar 'TAGS=a,b,c'
+# --additionalParameterJSON sends request fields the CLI has no flag for. Its value
+# is a JSON dict, or the name of a file containing one — a value starting with '{'
+# is the document itself, anything else is a filename.
+rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:latest \
+    --additionalParameterJSON '{"serviceAccount":"orders-sa"}'
+# Repeatable: the dicts are merged, a later one winning a key they share, and the
+# result is overlaid onto the request body. Merging is by top-level key, so a
+# repeated key is replaced whole rather than combined with what it had. Keys that
+# name a field the other flags set — containerImage here — override them.
+rossoctl agents import from-image --name orders --containerImage ghcr.io/x/y:latest \
+    --additionalParameterJSON ./base.json \
+    --additionalParameterJSON '{"containerImage":"ghcr.io/x/y:pinned"}'
 
 # `agents --namespace` overrides the context's namespace for any agents subcommand
 rossoctl agents --namespace team2 get orders    # -> GET /agents/team2/orders
@@ -231,6 +243,10 @@ rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y
     --envVar LOG_LEVEL=debug --envVar 'TAGS=a,b,c'
 # --ports sets service ports as name:port:targetPort[:protocol] (default http:9090:9090:TCP); a bare "port" = http:port:port:TCP
 rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest --ports grpc:9000:9001:TCP,8080
+# --additionalParameterJSON works as it does for agents: a JSON dict or a file
+# containing one, repeatable, merged by top-level key, and winning over the flags above
+rossoctl tools import from-image --name weather-mcp --containerImage ghcr.io/x/y:latest \
+    --additionalParameterJSON '{"serviceAccount":"mcp-sa"}' --additionalParameterJSON ./extra.json
 
 # A tool built from source reports "Building" until its build finishes, which is
 # often longer than the 60s default, so allow for it. A failed build reports

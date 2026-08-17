@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -454,6 +456,126 @@ func TestToolsImportCreateHTTPRouteIsPersistent(t *testing.T) {
 			t.Errorf("%s --help: %v", sub, err)
 		} else if !strings.Contains(out, "--createHttpRoute") {
 			t.Errorf("%s --help does not document --createHttpRoute:\n%s", sub, out)
+		}
+	}
+}
+
+// TestToolsImportAdditionalParameterJSON verifies inline and file values merge
+// into the request body, with a later value winning a shared key.
+//
+// The merge rules themselves are covered once, over the shared helper, in
+// additionalparams_test.go; what this pins is that `tools import` is wired to that
+// helper at all, and that the tool's own fields survive the overlay.
+func TestToolsImportAdditionalParameterJSON(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	path := filepath.Join(t.TempDir(), "extra.json")
+	if err := os.WriteFile(path, []byte(`{"fromFile":true,"shared":"file"}`), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	if _, err := execute(t, "tools", "import", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img",
+		"--additionalParameterJSON", path,
+		"--additionalParameterJSON", `{"shared":"inline","serviceAccount":"mcp-sa"}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if body["fromFile"] != true || body["serviceAccount"] != "mcp-sa" {
+		t.Errorf("both dicts should contribute: %+v", body)
+	}
+	if body["shared"] != "inline" {
+		t.Errorf("shared = %v, want inline (the later value wins)", body["shared"])
+	}
+	if body["name"] != "weather-mcp" || body["containerImage"] != "img" {
+		t.Errorf("flag-set fields lost: %+v", body)
+	}
+}
+
+// TestToolsImportAdditionalParameterJSONOverridesServicePorts verifies the
+// overlay replaces servicePorts, the field --ports builds.
+//
+// Worth its own test because --ports is the one create field unique to tools, and
+// because it has a non-empty default: the encoded request always contains it, so
+// overriding it exercises replacement of a present member rather than the
+// insertion of an absent one.
+func TestToolsImportAdditionalParameterJSONOverridesServicePorts(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	if _, err := execute(t, "tools", "import", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img",
+		"--additionalParameterJSON",
+		`{"servicePorts":[{"name":"grpc","port":50051,"targetPort":50051,"protocol":"TCP"}]}`); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	ports, ok := body["servicePorts"].([]any)
+	if !ok || len(ports) != 1 {
+		t.Fatalf("servicePorts = %#v, want the single overridden entry", body["servicePorts"])
+	}
+	first, ok := ports[0].(map[string]any)
+	if !ok {
+		t.Fatalf("servicePorts[0] = %#v, want an object", ports[0])
+	}
+	if first["name"] != "grpc" || first["port"] != float64(50051) {
+		t.Errorf("servicePorts[0] = %#v, want the grpc entry from the additional JSON", first)
+	}
+}
+
+// TestToolsImportAdditionalParameterJSONInvalid verifies a malformed value fails
+// the command and sends nothing.
+func TestToolsImportAdditionalParameterJSONInvalid(t *testing.T) {
+	isolateHome(t)
+	var body map[string]any
+	srv := newToolsImportServer(t, &body)
+	setupToolsImportContext(t, srv, "team1")
+
+	_, err := execute(t, "tools", "import", "from-image",
+		"--name", "weather-mcp", "--containerImage", "img",
+		"--additionalParameterJSON", "no-such-file.json")
+	if err == nil {
+		t.Fatal("expected an error for a missing file")
+	}
+	if !strings.Contains(err.Error(), "additionalParameterJSON") {
+		t.Errorf("error should name the flag: %v", err)
+	}
+	if body != nil {
+		t.Errorf("no tool should have been created, but the server received %+v", body)
+	}
+}
+
+// TestToolsImportAdditionalParameterJSONFlagSurface verifies both subcommands
+// inherit the flag and that it is a string array; see the agents counterpart for
+// why the type matters.
+func TestToolsImportAdditionalParameterJSONFlagSurface(t *testing.T) {
+	isolateHome(t)
+	for _, sub := range []string{"from-image", "from-source"} {
+		out, err := execute(t, "tools", "import", sub, "--help")
+		if err != nil {
+			t.Errorf("%s --help: %v", sub, err)
+			continue
+		}
+		if !strings.Contains(out, "--additionalParameterJSON") {
+			t.Errorf("%s --help does not document --additionalParameterJSON:\n%s", sub, out)
+		}
+
+		cmd, _, err := rootCmd.Find([]string{"tools", "import", sub})
+		if err != nil {
+			t.Fatalf("could not find %s: %v", sub, err)
+		}
+		f := cmd.InheritedFlags().Lookup("additionalParameterJSON")
+		if f == nil {
+			t.Fatalf("%s does not inherit --additionalParameterJSON", sub)
+		}
+		if f.Value.Type() != "stringArray" {
+			t.Errorf("%s --additionalParameterJSON is a %s; it must be a stringArray, or inline dicts are CSV-split",
+				sub, f.Value.Type())
 		}
 	}
 }
