@@ -51,6 +51,18 @@ type RunSpec struct {
 	// assigned ports are discovered afterwards with Inspect.
 	PublishPorts []int
 
+	// PortMappings are container ports to publish on a *specific* host port —
+	// the `-p HOST:CONTAINER` form.
+	//
+	// Distinct from PublishPorts rather than replacing it because the two answer
+	// to different needs. An ephemeral port cannot collide, so it is right
+	// whenever the caller learns the port afterwards from Inspect. A fixed one is
+	// required when something outside this process must be told the port in
+	// advance — an OTLP exporter configured to send to localhost:4318 has no way
+	// to discover a port the kernel chose — and it buys that at the cost of
+	// failing when the port is already taken.
+	PortMappings []PortMapping
+
 	// Mounts are host->container bind mounts.
 	Mounts []Mount
 
@@ -67,6 +79,20 @@ type RunSpec struct {
 	// Args are the container's command arguments, appended after the image and
 	// so passed to the image's own entrypoint.
 	Args []string
+}
+
+// PortMapping publishes a container port on a chosen host port.
+type PortMapping struct {
+	// HostPort is the port to bind on the host. Required.
+	HostPort int
+
+	// ContainerPort is the port inside the container. Required.
+	ContainerPort int
+}
+
+// arg renders the mapping as a -p value.
+func (p PortMapping) arg() string {
+	return strconv.Itoa(p.HostPort) + ":" + strconv.Itoa(p.ContainerPort)
 }
 
 // Mount is a bind mount of a host path into a container.
@@ -287,6 +313,9 @@ func (e *cliEngine) Start(ctx context.Context, spec RunSpec) (string, error) {
 		// which is the point: the host side is discovered with Inspect instead
 		// of being hardcoded and risking a collision.
 		args = append(args, "-p", strconv.Itoa(p))
+	}
+	for _, p := range spec.PortMappings {
+		args = append(args, "-p", p.arg())
 	}
 	for _, h := range spec.HostEntries {
 		args = append(args, "--add-host", h.arg())

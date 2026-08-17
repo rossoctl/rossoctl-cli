@@ -257,6 +257,37 @@ rossoctl tools wait weather-mcp --timeout 10m
 # does not implement the tool detail endpoint it polls (`tools get` fails there for
 # the same reason), so use `tools list` to check a local tool. `agents wait` works.
 
+# Run a local OpenTelemetry collector that forwards traces to MLflow. Generates a
+# collector config under ~/.config/rossoctl/otel and starts
+# otel/opentelemetry-collector-contrib with it mounted, receiving OTLP on 4317
+# (gRPC) and 4318 (HTTP). Needs docker or podman on PATH.
+rossoctl otel collect
+# --traces_endpoint sets the otlphttp/mlflow exporter's traces_endpoint. The
+# default reaches the host from inside the container, where "localhost" would mean
+# the collector itself.
+rossoctl otel collect --traces_endpoint http://host.containers.internal:5002/v1/traces
+# MLflow has to be listening for spans to arrive. When nothing is on the endpoint's
+# port, the command says so — and still starts the collector, since the exporter
+# retries and MLflow can be started afterwards:
+#   mlflow server --host 0.0.0.0 --port 5001 --allowed-hosts '*'
+# Both flags matter: MLflow otherwise binds loopback, which a container cannot
+# reach, and rejects requests whose Host header is host.containers.internal.
+#
+# The generated config's path and the receiver's HTTP endpoint are recorded in
+# ~/.config/rossoctl/otel-config.yaml. The container runs detached; stop it with
+# `podman stop` (or `docker stop`) using the name printed on start.
+
+# Send one mock span to that collector, to check the path from here to MLflow
+# without an instrumented workload. Random trace and span IDs each run, so every
+# invocation is a distinct trace; the span ends now and started one second ago.
+rossoctl otel send-mock-trace
+# --serviceName sets the span's service.name resource attribute, which is what a
+# trace backend groups by — so it is what the span is listed under in MLflow.
+rossoctl otel send-mock-trace --serviceName my-agent
+# --url overrides where it posts (default http://localhost:4318/v1/traces), for a
+# collector whose published port was remapped or that runs on another host.
+rossoctl otel send-mock-trace --url http://localhost:14318/v1/traces
+
 # List namespaces (GET <server>/namespaces)
 rossoctl namespaces list
 rossoctl namespaces list --all      # include non-rossoctl-enabled namespaces

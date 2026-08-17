@@ -702,3 +702,56 @@ func TestStopReportsRemoveFailure(t *testing.T) {
 		t.Fatal("expected a real remove failure to be reported")
 	}
 }
+
+// TestStartPortMappings verifies each fixed mapping becomes its own
+// -p HOST:CONTAINER, in the order given.
+//
+// Distinct from the PublishPorts assertions above: that form publishes on an
+// ephemeral host port, which cannot collide but also cannot be known in advance.
+// A caller that must publish a specific host port — an OTLP receiver an SDK is
+// configured to reach at 4318 — needs this form, and the two differ only in the
+// value of the -p argument, so nothing but a test distinguishes them.
+func TestStartPortMappings(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "abc123\n"}}
+	_, err := engineWith(f).Start(context.Background(), RunSpec{
+		Image: "otel/opentelemetry-collector-contrib:latest",
+		PortMappings: []PortMapping{
+			{HostPort: 4317, ContainerPort: 4317},
+			{HostPort: 14318, ContainerPort: 4318},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := joined(f.argsFor(t, "run"))
+	for _, want := range []string{"-p 4317:4317", "-p 14318:4318"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("run args %q missing %q", got, want)
+		}
+	}
+	// A mapping must not degrade to the ephemeral form, which would publish on a
+	// port the caller cannot predict.
+	if strings.Contains(got, "-p 4317 ") {
+		t.Errorf("run args %q published a bare port; the host side must be fixed", got)
+	}
+}
+
+// TestStartPublishPortsAndMappingsCoexist verifies a spec may use both forms, with
+// the ephemeral ports first.
+func TestStartPublishPortsAndMappingsCoexist(t *testing.T) {
+	f := &fakeRun{replies: map[string]string{"run": "abc123\n"}}
+	_, err := engineWith(f).Start(context.Background(), RunSpec{
+		Image:        "example/img:v1",
+		PublishPorts: []int{9094},
+		PortMappings: []PortMapping{{HostPort: 4318, ContainerPort: 4318}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := joined(f.argsFor(t, "run"))
+	if !strings.Contains(got, "-p 9094") || !strings.Contains(got, "-p 4318:4318") {
+		t.Errorf("run args %q should carry both the ephemeral and the fixed port", got)
+	}
+}
