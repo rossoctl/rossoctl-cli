@@ -1,6 +1,6 @@
 # rossoctl-cli
 
-A command-line interface for Rossoctl, built with [Cobra](https://github.com/spf13/cobra).
+A command-line interface for [Rossoctl](https://github.com/rossoctl/rossoctl).
 
 ## Install
 
@@ -14,7 +14,7 @@ PATH=$PATH:$HOME/.config/rossoctl
 # alternately, sudo mv $HOME/.config/rossoctl /usr/local/bin
 ```
 
-## Quick usage, for shared OpenShift Rossoctl API servers
+## Quick usage, for shared Rossoctl API servers
 
 ```sh
 # (Choose w3id for shared cluster login)
@@ -31,6 +31,8 @@ rossoctl agents list
 
 ## Running a command behind an AuthBridge pipeline
 
+Rossoctl can be used to test how an agent runs under an AuthBridge configuration on your laptop.  It provides an in-process implementation of AuthBridge.
+
 ```sh
 # `--config` is required and takes a local YAML file or a URL serving YAML (a
 # remote config is fetched to a temp file, which is removed on exit). Everything
@@ -40,85 +42,32 @@ rossoctl authbridge exec --config ./authbridge.yaml -- claude "explain this repo
 rossoctl authbridge exec --config https://example.com/authbridge.yaml -- ./script.sh --verbose
 ```
 
-What `authbridge exec` starts, driven by the config:
-
-| Config | What starts |
-| --- | --- |
-| `listener.roles` includes `forward` | forward proxy on `listener.forward_proxy_addr` (feeds traffic through the outbound pipeline) |
-| `tls_bridge.mode` not `disabled`/empty | TLS bridge, so the pipeline sees decrypted HTTPS instead of an opaque CONNECT tunnel |
-| `session.enabled` not `false` | session store, plus the session API on `listener.session_api_addr` when set |
-
-A listen address of port `0` is resolved to the port the kernel actually assigned,
-so an ephemeral proxy is still dialable by the hosted command.
-
-`--sessionServer` overrides the session API address when given explicitly
-(defaulting to `localhost:9094`, which leaves the config's own address alone):
-
-```sh
-# Serve the session API somewhere else, even if the config disabled sessions.
-rossoctl authbridge exec --sessionServer 127.0.0.1:9500 --config ./authbridge.yaml -- claude
-
-# Turn session tracking off entirely.
-rossoctl authbridge exec --sessionServer "" --config ./authbridge.yaml -- claude
-```
-
 The command's environment is pointed at whatever started: `HTTP_PROXY` for the
 forward proxy, plus `HTTPS_PROXY` and the CA trust variables
 (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`) when the TLS
 bridge runs. Variables already set in your environment are left alone. Everything
 is shut down when the command exits or on SIGINT/SIGTERM.
 
+The _rossoctl_ CLI also supports arguments for testing AuthBridge container image.
+
+
 `--with-claude-otel` additionally exports the variables that make Claude Code send
-traces to the local collector — `CLAUDE_CODE_ENABLE_TELEMETRY=1`,
-`CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`,
-`OTEL_TRACES_EXPORT_INTERVAL=1`, `OTEL_TRACES_EXPORTER=otlp`,
-`OTEL_LOGS_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, and
-`OTEL_EXPORTER_OTLP_ENDPOINT` built from `httpEndpoint` in
-`~/.config/rossoctl/otel-config.yaml`:
+traces to the local collector.
 
 ```sh
-rossoctl otel collect                      # writes otel-config.yaml
+rossoctl otel collect
 rossoctl authbridge exec --with-claude-otel --config ./authbridge.yaml -- claude
 ```
-
-It reads that record rather than assuming a port, so it fails — naming
-`rossoctl otel collect` — when no collector has been started on this host, instead
-of pointing the command at an endpoint that is not listening.
-
-`--otel-endpoint` overrides that address with a full URL, for a collector this host
-did not start. The record is then not read at all, so it needs no local collector:
-
-```sh
-rossoctl authbridge exec --with-claude-otel \
-    --otel-endpoint https://otel.example.com:4318 --config ./authbridge.yaml -- claude
-```
-
-The value must begin with `http://` or `https://`, and it sets one of the variables
-`--with-claude-otel` turns on — so passing it without that flag is an error rather
-than an implied opt-in.
 
 Authbridge's own log output goes to `--logfile` (default `/tmp/authbridge.log`)
 rather than stderr, so it does not interleave with the hosted command's output.
 The path is printed at startup; pass `--logfile ""` to log to stderr instead.
-
-Plugins are compiled in via one blank import per plugin, matching the authbridge
-binaries — including `context-guru`, which those binaries keep opt-in but which
-rossoctl links by default so the context-guru demos run without a special build.
-Drop any of them with its exclude tag:
-
-```sh
-go build -tags exclude_plugin_opa,exclude_plugin_contextguru
-```
-
-Note that `go run` reports its own exit status, not the command's, so it collapses
-any non-zero status to 1. Use a built binary when the exit code matters.
 
 ## Usage
 
 ```sh
 rossoctl --help
 rossoctl version
-rossoctl agents --help
 
 # Print instructions for installing the platform (clone + per-cluster setup script)
 rossoctl install
@@ -321,31 +270,10 @@ rossoctl otel send-mock-trace --url http://localhost:14318/v1/traces
 
 # List namespaces (GET <server>/namespaces)
 rossoctl namespaces list
-rossoctl namespaces list --all      # include non-rossoctl-enabled namespaces
-rossoctl namespaces list --json
 
 # Log the underlying REST requests to stderr
 rossoctl -v agents list
 ```
-
-## Tests
-
-```sh
-make test                      # go test ./...
-make vet
-gofmt -l .                     # prints files needing formatting; make fmt rewrites them
-go test ./... -race -count=1
-go test ./... -count=1 -shuffle=on
-```
-
-The suite needs no services, credentials, or network access: tests bind ephemeral
-localhost ports and point `HOME` at a temp directory, and the container tests
-assert on the command strings they would run rather than invoking a real runtime.
-
-`.github/workflows/ci.yml` runs exactly these on every pull request and on pushes
-to `main`, plus a `go mod tidy` check. Shuffled order is included because the
-suite mutates process state (`HOME`, cobra flag values), so an order-dependent
-test is a real risk — see the pflag hazard documented in `cmd/root_test.go`.
 
 ## Full docs
 
