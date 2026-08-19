@@ -120,6 +120,9 @@ print `UNIMPLEMENTED` as a placeholder.
 
 ## Tests
 
+See [developer.md](developer.md) for narrowing a run while iterating, reproducing
+each CI pass locally, and building against a local clone of cortex.
+
 ```sh
 make test                      # go test ./...
 make vet
