@@ -27,8 +27,9 @@ const agentCardPath = "/.well-known/agent-card.json"
 // must not hang this server's own client indefinitely.
 const agentCardTimeout = 10 * time.Second
 
-// cardFetcher fetches the card document at the given URL. A variable so a test can
-// answer without a live agent, following lister and getter above; production
+// cardFetcher fetches the card document at the given URL, sending authorization
+// verbatim as the Authorization header when it is non-empty. A variable so a test
+// can answer without a live agent, following lister and getter above; production
 // always uses the real HTTP client.
 var cardFetcher = fetchCardDocument
 
@@ -84,8 +85,25 @@ func agentCardRoute(opts) http.HandlerFunc {
 			return
 		}
 
+		// The caller's Authorization header is relayed to the agent. An agent hosted
+		// by `authbridge exec` sits behind the inbound pipeline, which answers an
+		// unauthenticated request with 401 and WWW-Authenticate: Bearer — so without
+		// this, a card could never be fetched for exactly the agents this server
+		// exists to describe, and the failure surfaced as a 401 from this endpoint
+		// that read as "your credentials were rejected" when they had never been sent.
+		//
+		// Relayed verbatim rather than read from the config file: this handler is a
+		// proxy for one request, and the caller has already chosen which identity to
+		// present. Reading a token from disk would make the response depend on state
+		// the caller cannot see, and would attach a credential to a request that
+		// deliberately carried none.
+		//
+		// Only ever sent to inst.InboundAddr, which is a loopback address this host
+		// recorded for a process it started. That matters: relaying a bearer token is
+		// safe here because the destination is not caller-controlled — it comes from
+		// the instance record, not from the request.
 		cardURL := "http://" + inst.InboundAddr + agentCardPath
-		body, status, err := cardFetcher(r.Context(), cardURL)
+		body, status, err := cardFetcher(r.Context(), cardURL, r.Header.Get("Authorization"))
 		if err != nil {
 			// 503, matching the backend's httpx.RequestError branch: the agent could
 			// not be reached, which is the agent's state and not a fault in this
@@ -125,10 +143,16 @@ func agentCardRoute(opts) http.HandlerFunc {
 // fetchCardDocument GETs the card document, returning the body and status. The
 // body is read even for an error status so a caller can report what was served.
 //
+// authorization, when non-empty, is sent as the Authorization header verbatim —
+// scheme included, since the caller's own header is being forwarded rather than a
+// token being formatted. An empty value sends no header at all, which is what an
+// unauthenticated caller asked for and what an agent with no inbound policy
+// expects.
+//
 // The read is capped: this server is asking a process it does not control, and an
 // agent streaming an endless body should fail rather than consume this server's
 // memory. A card is a few kilobytes, so a megabyte is generous.
-func fetchCardDocument(ctx context.Context, cardURL string) ([]byte, int, error) {
+func fetchCardDocument(ctx context.Context, cardURL, authorization string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, agentCardTimeout)
 	defer cancel()
 
@@ -137,6 +161,9 @@ func fetchCardDocument(ctx context.Context, cardURL string) ([]byte, int, error)
 		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

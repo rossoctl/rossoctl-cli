@@ -36,8 +36,6 @@ listener:
   # :8000 — that is authbridge's address, in front of it.
   reverse_proxy_backend: http://127.0.0.1:8001
 mode: proxy-sidecar
-mtls:
-  mode: permissive
 pipeline:
   inbound:
     plugins:
@@ -61,5 +59,8 @@ pipeline:
         keycloak_realm: rossoctl
         keycloak_url: http://keycloak.localtest.me:8080/
       name: token-exchange
-spiffe:
-  socket: unix:///spiffe-workload-api/spire-agent.sock
+# spiffe:
+#   socket: unix:///spiffe-workload-api/spire-agent.sock
+# Commented out, because mTLS requires the SPIFFE block
+# mtls:
+#   mode: permissive

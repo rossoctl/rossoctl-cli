@@ -40,9 +40,11 @@ perfectly reachable; --address http://<route>:<port> is the way past it.
 ` + "`a2a send`" + `: the message text is sent as a single user text part, the
 response is streamed event by event as it arrives, and --with-authorization
 attaches the effective context's bearer token as an Authorization header on each
-request. Note that the card lookup always carries the context's token, since it
-goes to the platform API, while the message carries one only with
---with-authorization.
+request. Note that the card lookup carries the context's token, since it goes to
+the platform API — but an explicit --server sends none — while the message carries
+one only with --with-authorization. A local cortex relays that token on to the
+agent when it fetches the card, which is what lets it describe an agent hosted
+behind an authbridge inbound pipeline.
 
 With --verbose both the card lookup and the message are reported on stderr.`,
 	Args: cobra.ExactArgs(1),

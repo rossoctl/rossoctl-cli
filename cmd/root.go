@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -244,6 +245,14 @@ func errorHint(err error) string {
 
 	switch statusErr.StatusCode {
 	case http.StatusUnauthorized:
+		// A 401 the server relayed from something it called on our behalf is a
+		// different problem with different advice: our credentials were accepted, so
+		// signing in again fixes nothing. Reported separately rather than folded in,
+		// because the generic hint actively misleads here — it names the one remedy
+		// that cannot work.
+		if upstream := relayedUnauthorizedHint(statusErr.Body); upstream != "" {
+			return upstream
+		}
 		// Deliberately not suggested for 403: that is an authenticated
 		// identity lacking permission, where signing in again changes
 		// nothing and the advice would send the user in a circle.
@@ -251,6 +260,27 @@ func errorHint(err error) string {
 	default:
 		return ""
 	}
+}
+
+// relayedUnauthorizedHint returns advice for a 401 whose body shows the server was
+// reporting an upstream's refusal rather than its own, or "" when it was not.
+//
+// The distinction is worth drawing because the two are indistinguishable by status
+// alone, and the remedies are opposites: for our own rejection, sign in again; for a
+// relayed one, our credentials were fine and the agent is what refused them.
+//
+// Matched on the body text the agent-card endpoint produces (see
+// internal/serve/agentcard.go), which is also the shape the Python backend's
+// equivalent returns. A body this does not recognize yields "" and the caller falls
+// back to the generic hint, so an unrecognized 401 is no worse than before.
+func relayedUnauthorizedHint(body string) string {
+	if !strings.Contains(body, "failed to fetch agent card from") {
+		return ""
+	}
+	return "Hint: your credentials were accepted; the agent itself refused them, so " +
+		"`rossoctl login` will not help. An agent hosted by `authbridge exec` sits behind " +
+		"its inbound pipeline — check that pipeline's policy, and that the token carries " +
+		"the audience and scopes it requires (`rossoctl auth status`)."
 }
 
 func init() {

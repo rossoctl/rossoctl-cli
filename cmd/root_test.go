@@ -320,3 +320,56 @@ func TestErrorHintQuietForOtherErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestErrorHintDistinguishesRelayedUnauthorized verifies a 401 the server relayed
+// from an agent it called on our behalf does not get the sign-in hint.
+//
+// The two 401s are indistinguishable by status but have opposite remedies. This body
+// is what `agents card` produces for an agent behind an `authbridge exec` inbound
+// pipeline: our credentials were accepted by the server, the agent refused them, and
+// `rossoctl login` cannot help — so naming it would send the user to the one remedy
+// that is guaranteed not to work.
+func TestErrorHintDistinguishesRelayedUnauthorized(t *testing.T) {
+	err := &apiclient.StatusError{
+		Endpoint:   "http://localhost:9097/api/v1/chat/team1/weather-praxis/agent-card",
+		StatusCode: http.StatusUnauthorized,
+		Body:       `{"detail":"failed to fetch agent card from 127.0.0.1:38531: agent returned 401"}`,
+	}
+
+	hint := errorHint(err)
+	if hint == "" {
+		t.Fatal("a relayed 401 should still produce a hint")
+	}
+	// It must not *instruct* a sign-in. Naming the command to rule it out is fine —
+	// and is why this checks for the instruction rather than for the command name,
+	// which appears in "`rossoctl login` will not help".
+	if strings.Contains(hint, "Run `rossoctl login`") {
+		t.Errorf("hint %q must not instruct a sign-in: the server accepted the credentials", hint)
+	}
+	if !strings.Contains(hint, "will not help") {
+		t.Errorf("hint %q should say signing in will not help, so the reader stops reaching for it", hint)
+	}
+	// It has to say whose refusal this was, or the reader is left where they started.
+	if !strings.Contains(hint, "agent") {
+		t.Errorf("hint %q should say the agent refused the credentials", hint)
+	}
+}
+
+// TestErrorHintFallsBackForUnrecognizedBody verifies a 401 whose body is not a
+// recognized relay still gets the ordinary sign-in hint.
+//
+// The relay detection is a body-text match, so it must fail open: an unrecognized
+// 401 should be no worse off than before the distinction existed.
+func TestErrorHintFallsBackForUnrecognizedBody(t *testing.T) {
+	for _, body := range []string{
+		`{"detail":"Token signing key not found"}`,
+		`{"detail":"failed to connect to agent at 127.0.0.1:38531: connection refused"}`,
+		"",
+	} {
+		err := &apiclient.StatusError{StatusCode: http.StatusUnauthorized, Body: body}
+		hint := errorHint(err)
+		if !strings.Contains(hint, "rossoctl login") {
+			t.Errorf("for body %q, hint = %q; want the sign-in hint", body, hint)
+		}
+	}
+}

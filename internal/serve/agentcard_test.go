@@ -14,14 +14,23 @@ import (
 // not need a live agent listening on the fixture's inbound address.
 func stubCardFetcher(t *testing.T, body string, status int, err error) *string {
 	t.Helper()
+	requested, _ := stubCardFetcherRecording(t, body, status, err)
+	return requested
+}
+
+// stubCardFetcherRecording is stubCardFetcher, additionally reporting the
+// Authorization value the handler passed on. Separate so the existing callers stay
+// as they were: only the relay tests care about the header.
+func stubCardFetcherRecording(t *testing.T, body string, status int, err error) (requestedURL, authorization *string) {
+	t.Helper()
 	saved := cardFetcher
-	var requested string
-	cardFetcher = func(_ context.Context, cardURL string) ([]byte, int, error) {
-		requested = cardURL
+	var gotURL, gotAuth string
+	cardFetcher = func(_ context.Context, cardURL, auth string) ([]byte, int, error) {
+		gotURL, gotAuth = cardURL, auth
 		return []byte(body), status, err
 	}
 	t.Cleanup(func() { cardFetcher = saved })
-	return &requested
+	return &gotURL, &gotAuth
 }
 
 // a2aCard is a card as a v0.3 A2A server serves one: url at the top level,
@@ -344,5 +353,137 @@ func TestAgentCardWithoutInboundAddressIsUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(detail, "keen-ridge-0003") {
 		t.Errorf("detail = %q, should name the instance", detail)
+	}
+}
+
+// getCardWithAuth requests the endpoint with an Authorization header, returning the
+// status. Separate from getCard because these tests care about what was relayed
+// rather than about the decoded card.
+func getCardWithAuth(t *testing.T, ts *httptest.Server, path, authorization string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	res, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	return res.StatusCode
+}
+
+// TestAgentCardRelaysAuthorization verifies the caller's Authorization header is
+// forwarded to the agent.
+//
+// Without this the card of an agent hosted by `authbridge exec` can never be
+// fetched: the inbound pipeline answers an unauthenticated request with 401 and
+// WWW-Authenticate: Bearer, and the failure surfaced here as a 401 that read as
+// "your credentials were rejected" when none had been sent.
+func TestAgentCardRelaysAuthorization(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	_, auth := stubCardFetcherRecording(t, a2aCard, http.StatusOK, nil)
+	ts := newTestServer(t, "/api/v1")
+
+	const token = "Bearer test-token-value"
+	if status := getCardWithAuth(t, ts, "/api/v1/chat/recorded1/swift-falcon-0001/agent-card", token); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	// Verbatim, scheme included: the caller's own header is being forwarded, not a
+	// token being reformatted.
+	if *auth != token {
+		t.Errorf("relayed Authorization = %q, want %q", *auth, token)
+	}
+}
+
+// TestAgentCardRelaysAuthorizationVerbatim verifies a non-Bearer scheme is passed on
+// unchanged, rather than being parsed or reformatted.
+//
+// The handler does not interpret the credential — an agent's inbound policy decides
+// what it accepts, and rewriting the header here would break a scheme this code does
+// not know about.
+func TestAgentCardRelaysAuthorizationVerbatim(t *testing.T) {
+	for _, header := range []string{
+		"Bearer abc.def.ghi",
+		"Basic dXNlcjpwYXNz",
+		"DPoP some-other-credential",
+	} {
+		t.Run(header, func(t *testing.T) {
+			stubGetter(t, mixedInstances())
+			_, auth := stubCardFetcherRecording(t, a2aCard, http.StatusOK, nil)
+			ts := newTestServer(t, "/api/v1")
+
+			getCardWithAuth(t, ts, "/api/v1/chat/recorded1/swift-falcon-0001/agent-card", header)
+			if *auth != header {
+				t.Errorf("relayed %q, want %q", *auth, header)
+			}
+		})
+	}
+}
+
+// TestAgentCardSendsNoAuthorizationWhenNoneGiven verifies an unauthenticated request
+// stays unauthenticated.
+//
+// The handler must not supply a credential of its own — reading a token from the
+// config file would attach one to a request that deliberately carried none, and would
+// make the response depend on state the caller cannot see.
+func TestAgentCardSendsNoAuthorizationWhenNoneGiven(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	_, auth := stubCardFetcherRecording(t, a2aCard, http.StatusOK, nil)
+	ts := newTestServer(t, "/api/v1")
+
+	getCard(t, ts, "/api/v1/chat/recorded1/swift-falcon-0001/agent-card")
+
+	if *auth != "" {
+		t.Errorf("relayed Authorization = %q, want none for an unauthenticated caller", *auth)
+	}
+}
+
+// TestFetchCardDocumentSetsAuthorization verifies the real fetcher — not the stub —
+// sends the header, and sends none when the value is empty.
+//
+// Worth testing against a live server: every test above replaces cardFetcher, so
+// nothing else covers the function that actually builds the outbound request.
+func TestFetchCardDocumentSetsAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		authorization string
+		wantHeader    string
+		wantPresent   bool
+	}{
+		{"with a token", "Bearer xyz", "Bearer xyz", true},
+		{"empty sends no header", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var present bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Authorization")
+				_, present = r.Header["Authorization"]
+				if r.Header.Get("Accept") != "application/json" {
+					t.Errorf("Accept = %q, want application/json", r.Header.Get("Accept"))
+				}
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			_, status, err := fetchCardDocument(context.Background(), srv.URL, tc.authorization)
+			if err != nil {
+				t.Fatalf("fetchCardDocument: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if got != tc.wantHeader {
+				t.Errorf("Authorization = %q, want %q", got, tc.wantHeader)
+			}
+			if present != tc.wantPresent {
+				t.Errorf("Authorization present = %v, want %v", present, tc.wantPresent)
+			}
+		})
 	}
 }
