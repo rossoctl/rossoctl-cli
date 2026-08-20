@@ -198,9 +198,27 @@ func printContextResource(cmd *cobra.Command, value *apiclient.ContextResource, 
 		cmd.Println(string(encoded))
 		return nil
 	}
-	cmd.Printf("%s/%s: %s %s, %s %s, claim %s\n", value.Namespace, value.Name,
-		value.Status, value.Type, value.Storage.Size, value.Storage.AccessMode, value.Attachment.ClaimName)
-	return nil
+	storageClass := value.Storage.StorageClass
+	if storageClass == "" {
+		storageClass = "<default>"
+	}
+	writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintln(writer, "Context Information")
+	fmt.Fprintf(writer, "  Name:\t%s\n", value.Name)
+	fmt.Fprintf(writer, "  Namespace:\t%s\n", value.Namespace)
+	fmt.Fprintf(writer, "  Type:\t%s\n", value.Type)
+	fmt.Fprintf(writer, "  Status:\t%s\n", value.Status)
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Storage")
+	fmt.Fprintf(writer, "  Backend:\t%s\n", value.Storage.Backend)
+	fmt.Fprintf(writer, "  Size:\t%s\n", value.Storage.Size)
+	fmt.Fprintf(writer, "  Access Mode:\t%s\n", value.Storage.AccessMode)
+	fmt.Fprintf(writer, "  Storage Class:\t%s\n", storageClass)
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Attachment")
+	fmt.Fprintf(writer, "  Kind:\t%s\n", value.Attachment.Kind)
+	fmt.Fprintf(writer, "  Claim:\t%s\n", value.Attachment.ClaimName)
+	return writer.Flush()
 }
 
 func init() {

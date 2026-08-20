@@ -113,6 +113,21 @@ func printAgentDetail(out io.Writer, a *apiclient.AgentDetail, hasRoute *bool) {
 	rows.add("UID", strDeref(a.Metadata.UID, "N/A"))
 	rows.flush(out)
 
+	if len(a.Contexts) > 0 {
+		section(out, "Contexts")
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "  NAME\tTYPE\tMOUNT PATH\tACCESS\tCLAIM")
+		for _, c := range a.Contexts {
+			access := "Read-write"
+			if c.ReadOnly {
+				access = "Read-only"
+			}
+			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n",
+				c.Name, orDefault(c.Type, "-"), c.MountPath, access, orDefault(c.ClaimName, "-"))
+		}
+		_ = w.Flush()
+	}
+
 	// Endpoint (Service info, when present).
 	//
 	// The external route is reported here, beside the Service, because both

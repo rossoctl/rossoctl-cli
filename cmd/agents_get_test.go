@@ -34,6 +34,10 @@ const agentDetailBody = `{
 	},
 	"workloadType": "deployment",
 	"readyStatus": "Ready",
+	"contexts": [{
+		"name": "research", "type": "workspace", "mountPath": "/workspace",
+		"readOnly": false, "claimName": "context-research"
+	}],
 	"service": {
 		"name": "orders",
 		"type": "ClusterIP",
@@ -100,6 +104,7 @@ func TestAgentsGetText(t *testing.T) {
 		"Replicas:", "2/2 ready (2 available)",
 		"Created:", "2026-01-02T03:04:05Z",
 		"UID:", "abc-123",
+		"Contexts", "research", "workspace", "/workspace", "Read-write", "context-research",
 		"Endpoint",
 		"Service:", "orders (ClusterIP)",
 		"Cluster IP:", "10.0.0.5",
@@ -137,12 +142,19 @@ func TestAgentsGetJSON(t *testing.T) {
 			Name string `json:"name"`
 		} `json:"metadata"`
 		ReadyStatus string `json:"readyStatus"`
+		Contexts    []struct {
+			Name      string `json:"name"`
+			MountPath string `json:"mountPath"`
+		} `json:"contexts"`
 	}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out)
 	}
 	if decoded.Metadata.Name != "orders" || decoded.ReadyStatus != "Ready" {
 		t.Errorf("unexpected decoded JSON: %+v", decoded)
+	}
+	if len(decoded.Contexts) != 1 || decoded.Contexts[0].Name != "research" || decoded.Contexts[0].MountPath != "/workspace" {
+		t.Errorf("contexts missing from JSON: %+v", decoded.Contexts)
 	}
 }
 

@@ -40,16 +40,26 @@ package agentapi
 // backend fills them from a Kubernetes custom resource, which has no fixed shape
 // here. Callers read them opportunistically rather than relying on any key.
 type AgentDetail struct {
-	Metadata     AgentMetadata  `json:"metadata"`
-	Spec         map[string]any `json:"spec"`
-	Status       map[string]any `json:"status"`
-	WorkloadType string         `json:"workloadType"`
-	ReadyStatus  string         `json:"readyStatus"`
+	Metadata     AgentMetadata       `json:"metadata"`
+	Spec         map[string]any      `json:"spec"`
+	Status       map[string]any      `json:"status"`
+	WorkloadType string              `json:"workloadType"`
+	ReadyStatus  string              `json:"readyStatus"`
+	Contexts     []ContextAttachment `json:"contexts,omitempty"`
 
 	// Service is absent for anything not fronted by a Kubernetes Service — a
 	// local `authbridge exec` instance has no ClusterIP, and naming one nothing
 	// would answer on is worse than reporting none.
 	Service *ServiceInfo `json:"service"`
+}
+
+// ContextAttachment describes a named Context Service resource mounted in an agent.
+type ContextAttachment struct {
+	Name      string `json:"name"`
+	Type      string `json:"type,omitempty"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly"`
+	ClaimName string `json:"claimName,omitempty"`
 }
 
 // ToolDetail mirrors the backend's GET /tools/{namespace}/{name} response, which

@@ -87,6 +87,47 @@ func TestContextsList(t *testing.T) {
 	}
 }
 
+func TestContextGetShowsLabeledDetails(t *testing.T) {
+	isolateHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case "/api/v1/contexts/team1/research":
+			_, _ = w.Write([]byte(`{"name":"research","namespace":"team1","type":"workspace","status":"ready","storage":{"backend":"pvc","size":"10Gi","accessMode":"ReadWriteMany","storageClass":"ibm-scale-csi"},"attachment":{"kind":"pvc","claimName":"context-research"}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	setupImportContext(t, srv, "team1")
+
+	out, err := execute(t, "context", "get", "research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"Context Information",
+		"Name:       research",
+		"Namespace:  team1",
+		"Type:       workspace",
+		"Status:     ready",
+		"Storage",
+		"Backend:        pvc",
+		"Size:           10Gi",
+		"Access Mode:    ReadWriteMany",
+		"Storage Class:  ibm-scale-csi",
+		"Attachment",
+		"Kind:   pvc",
+		"Claim:  context-research",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("get output missing %q:\n%s", expected, out)
+		}
+	}
+}
+
 func TestContextsListExplainsUnsupportedServer(t *testing.T) {
 	isolateHome(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
