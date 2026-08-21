@@ -145,7 +145,7 @@ func newContextsListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				cmd.Println(string(encoded))
+				fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
 				return nil
 			}
 			if len(result.Items) == 0 {
@@ -195,7 +195,7 @@ func printContextResource(cmd *cobra.Command, value *apiclient.ContextResource, 
 		if err != nil {
 			return err
 		}
-		cmd.Println(string(encoded))
+		fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
 		return nil
 	}
 	storageClass := value.Storage.StorageClass

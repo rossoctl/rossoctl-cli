@@ -128,6 +128,38 @@ func TestContextGetShowsLabeledDetails(t *testing.T) {
 	}
 }
 
+func TestContextGetJSONWritesOnlyToStdout(t *testing.T) {
+	isolateHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case "/api/v1/contexts/team1/research":
+			_, _ = w.Write([]byte(`{"name":"research","namespace":"team1","type":"workspace","status":"ready","storage":{"backend":"pvc","size":"1Gi","accessMode":"ReadWriteOnce"},"attachment":{"kind":"pvc","claimName":"context-research"}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	setupImportContext(t, srv, "team1")
+
+	stdout, stderr, err := executeSplit(t, "context", "get", "research", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	if result["name"] != "research" {
+		t.Fatalf("name = %v, want research", result["name"])
+	}
+}
+
 func TestContextsListExplainsUnsupportedServer(t *testing.T) {
 	isolateHome(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
