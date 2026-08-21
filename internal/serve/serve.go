@@ -3,7 +3,9 @@
 // The API surface mirrors the OpenAPI document the real backend publishes at
 // /api/openapi.json: every operation in that document is routed here, so a UI
 // pointed at this server sees the same set of endpoints rather than a wall of
-// 404s. Most are placeholders that answer 500 UNIMPLEMENTED. Ten are real:
+// 404s. The /contexts operations are routed too, though they postdate that
+// document; see the note on them in apiRoutes. Most are placeholders that answer
+// 500 UNIMPLEMENTED. Ten are real:
 //
 //   - GET /auth/config reports authentication as disabled, so a UI can finish
 //     initializing without a Keycloak realm behind it.
@@ -150,6 +152,23 @@ var apiRoutes = []Route{
 	{http.MethodGet, "/config/features", unimplemented},
 	{http.MethodGet, "/config/mcp-gateway-status", unimplemented},
 	{http.MethodGet, "/config/platform-status", unimplemented},
+
+	// contexts
+	//
+	// The context resource API (rossoctl/rossoctl#2392) is newer than the OpenAPI
+	// document the rest of this table was transcribed from, so these are listed
+	// from the paths internal/apiclient requests rather than from that document.
+	// They are placeholders like most of the table, but they have to be *present*:
+	// an unlisted path falls through to the mux and 404s, and a 404 from a cortex
+	// context is the same answer a server that predates the context API gives —
+	// which is what `contexts list` reads as "this server does not support context
+	// infrastructure". A local cortex does not support it either, but for an
+	// unrelated reason, and reporting the two identically sends the user looking at
+	// their server's version instead of at their current context.
+	{http.MethodPost, "/contexts", unimplemented},
+	{http.MethodGet, "/contexts/{namespace}", unimplemented},
+	{http.MethodDelete, "/contexts/{namespace}/{name}", unimplemented},
+	{http.MethodGet, "/contexts/{namespace}/{name}", unimplemented},
 
 	// namespaces
 	{http.MethodGet, "/namespaces", namespacesRoute},

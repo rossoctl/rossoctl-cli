@@ -1,9 +1,12 @@
 package serve
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/rossoctl-cli/internal/agentapi"
@@ -318,4 +321,71 @@ func TestAgentCardNullDescriptionDecodes(t *testing.T) {
 	if got.Name == "" {
 		t.Error("decode was vacuous; nothing arrived")
 	}
+}
+
+// TestContextRoutesAreReachedByTheClient verifies each context operation the CLI
+// can issue lands on a registered route, by driving the real client against this
+// server rather than by requesting a hand-written path.
+//
+// This is the regression test for the bug it was written for: the /contexts paths
+// were absent from the route table, so every context command 404'd. A 404 is not a
+// neutral failure here — `contexts list` reads it as "this Rosso server does not
+// support context infrastructure" (see contextListError), which is a true statement
+// about an old *server* and a misleading one about a local cortex, sending the user
+// to check their server's version instead of their current context.
+//
+// Asserting through apiclient is what makes this catch drift: a test requesting
+// "/contexts/ns/name" by hand would keep passing if the client changed the path it
+// asks for, which is exactly how the table fell behind in the first place.
+func TestContextRoutesAreReachedByTheClient(t *testing.T) {
+	stubGetter(t, mixedInstances())
+	ts := newTestServer(t, "/api/v1")
+	client := &apiclient.Client{BaseURL: ts.URL + "/api/v1/"}
+
+	// requireUnimplemented asserts the call reached a placeholder route: a 500
+	// carrying the UNIMPLEMENTED detail, never a 404 from the mux.
+	requireUnimplemented := func(t *testing.T, op string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected an error from a placeholder route", op)
+		}
+		var statusErr *apiclient.StatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("%s: error is not a StatusError: %v", op, err)
+		}
+		if statusErr.StatusCode == http.StatusNotFound {
+			t.Fatalf("%s: got 404 — the path the client requests is not in the route table: %v",
+				op, err)
+		}
+		if statusErr.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500", op, statusErr.StatusCode)
+		}
+		if !strings.Contains(statusErr.Body, unimplementedMessage) {
+			t.Errorf("%s: body = %q, want it to carry %q", op, statusErr.Body, unimplementedMessage)
+		}
+	}
+
+	ctx := context.Background()
+
+	t.Run("CreateContext", func(t *testing.T) {
+		_, err := client.CreateContext(ctx, &apiclient.CreateContextRequest{
+			Name: "research", Namespace: "nsA", Type: "workspace",
+		})
+		requireUnimplemented(t, "CreateContext", err)
+	})
+
+	t.Run("ListContexts", func(t *testing.T) {
+		_, err := client.ListContexts(ctx, "nsA")
+		requireUnimplemented(t, "ListContexts", err)
+	})
+
+	t.Run("GetContext", func(t *testing.T) {
+		_, err := client.GetContext(ctx, "nsA", "research")
+		requireUnimplemented(t, "GetContext", err)
+	})
+
+	t.Run("DeleteContext", func(t *testing.T) {
+		err := client.DeleteContext(ctx, "nsA", "research")
+		requireUnimplemented(t, "DeleteContext", err)
+	})
 }
