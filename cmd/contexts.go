@@ -226,10 +226,10 @@ func init() {
 	contextsCmd.Aliases = []string{"context"}
 	contextsCmd.Long = `Manage durable context infrastructure for agents.
 
-Context resources make files available to agents as workspaces, memory,
-knowledge, or artifacts. They are distinct from rossoctl configuration
-contexts and from an LLM's finite context window. The current backend is
-PVC-backed storage mounted into StatefulSet or Sandbox agents.
+This is Rosso's Agent Context Infrastructure: context resources make files
+available to agents as workspaces, memory, knowledge, or artifacts.
+They are distinct from rossoctl configuration contexts and from an LLM's finite context window.
+The current backend is PVC-backed storage mounted into StatefulSet or Sandbox agents.
 
 Learn more:
 https://github.com/rossoctl/rossoctl/blob/main/docs/concepts/context-service.md`

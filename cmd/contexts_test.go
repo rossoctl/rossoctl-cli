@@ -241,6 +241,7 @@ func TestContextGroupHelpDefinesContextInfrastructure(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"durable context infrastructure for agents",
+		"Agent Context Infrastructure",
 		"distinct from rossoctl configuration",
 		"LLM's finite context window",
 		"PVC-backed storage",
