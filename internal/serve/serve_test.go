@@ -325,8 +325,8 @@ func TestListenPortInUse(t *testing.T) {
 }
 
 // TestRouteTableMatchesOpenAPI guards the operation count against accidental
-// edits to the route table. The count is 48: 44 operations from the backend's
-// OpenAPI document under /api/v1, plus the 4 context operations described below,
+// edits to the route table. The count is 49: 44 operations from the backend's
+// OpenAPI document under /api/v1, plus the 5 context operations described below,
 // with /health and /ready at the root counted separately.
 //
 // It was 43 until PUT /agents/{namespace}/{name}/identity-config was added: the
@@ -335,8 +335,9 @@ func TestListenPortInUse(t *testing.T) {
 // correct alongside evidence that the document grew — otherwise a route invented
 // here would be waved through.
 //
-// The 4 context routes (POST /contexts, GET /contexts/{namespace}, and GET and
-// DELETE /contexts/{namespace}/{name}) are the evidence-backed exception to
+// The 5 context routes (GET /context-storage-classes, POST /contexts,
+// GET /contexts/{namespace}, and GET and DELETE /contexts/{namespace}/{name})
+// are the evidence-backed exception to
 // "transcribed from the document": they are the context resource API from
 // rossoctl/rossoctl#2392, which postdates the document this table was built from,
 // and they are listed from the paths internal/apiclient actually requests.
@@ -344,7 +345,7 @@ func TestListenPortInUse(t *testing.T) {
 // that — it drives the real client, so a path here that the client does not ask
 // for, or vice versa, fails.
 func TestRouteTableMatchesOpenAPI(t *testing.T) {
-	if got, want := len(APIRoutes()), 48; got != want {
+	if got, want := len(APIRoutes()), 49; got != want {
 		t.Errorf("API route count = %d, want %d", got, want)
 	}
 	if got, want := len(HealthRoutes()), 2; got != want {

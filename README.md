@@ -39,6 +39,9 @@ is maintained in the
 [context-service repository](https://github.com/rossoctl/context-service).
 
 ```sh
+# Discover storage choices without direct Kubernetes access.
+rossoctl context storage-classes
+
 # Create and inspect a shared workspace.
 rossoctl context create research --shared --size 10Gi \
     --storage-class ibm-scale-csi

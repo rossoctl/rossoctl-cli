@@ -379,6 +379,11 @@ func TestContextRoutesAreReachedByTheClient(t *testing.T) {
 		requireUnimplemented(t, "ListContexts", err)
 	})
 
+	t.Run("ListContextStorageClasses", func(t *testing.T) {
+		_, err := client.ListContextStorageClasses(ctx)
+		requireUnimplemented(t, "ListContextStorageClasses", err)
+	})
+
 	t.Run("GetContext", func(t *testing.T) {
 		_, err := client.GetContext(ctx, "nsA", "research")
 		requireUnimplemented(t, "GetContext", err)

@@ -48,6 +48,27 @@ func TestGetAuthConfig(t *testing.T) {
 	}
 }
 
+func TestListContextStorageClasses(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"items":[{"name":"fast","default":true,"provisioner":"example.csi.io","volumeBindingMode":"Immediate","reclaimPolicy":"Delete","allowVolumeExpansion":true}]}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/api/v1/"}
+	result, err := c.ListContextStorageClasses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/v1/context-storage-classes" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if len(result.Items) != 1 || result.Items[0].Name != "fast" || !result.Items[0].Default || !result.Items[0].AllowVolumeExpansion {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
 func TestGetAuthConfigBaseWithoutTrailingSlash(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/auth/config" {

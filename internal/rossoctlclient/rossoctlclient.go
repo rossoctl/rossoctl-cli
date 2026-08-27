@@ -71,6 +71,9 @@ type Rossoctl interface {
 	// ListContexts lists context resources in a namespace.
 	ListContexts(ctx context.Context, namespace string) (*apiclient.ContextListResponse, error)
 
+	// ListContextStorageClasses lists the storage choices available for contexts.
+	ListContextStorageClasses(ctx context.Context) (*apiclient.ContextStorageClassListResponse, error)
+
 	// GetContext fetches a named context resource in a namespace.
 	GetContext(ctx context.Context, namespace, name string) (*apiclient.ContextResource, error)
 
