@@ -29,13 +29,16 @@ rossoctl login
 rossoctl agents list
 ```
 
-## Agent context infrastructure
+## Agent Context Infrastructure
 
-`rossoctl context` creates, lists, and attaches the context resources provided
-by Rosso's optional Context Service integration. See Rosso's canonical
-[Context Service documentation](https://github.com/rossoctl/rossoctl/blob/main/docs/concepts/context-service.md)
-for the resource model, storage behavior, and lifecycle. The underlying service
-is maintained in the
+Agent Context Infrastructure makes workspaces, memory, knowledge, artifacts, and
+related runtime state available to agents. It is distinct from the finite context
+window sent to an LLM.
+
+`rossoctl context` creates, lists, and attaches these resources through Rosso's
+optional Context Service integration. See Rosso's canonical
+[Agent Context Infrastructure documentation](https://github.com/rossoctl/rossoctl/blob/main/docs/concepts/context-service.md)
+for the resource model, storage behavior, and lifecycle. The component is maintained in the
 [context-service repository](https://github.com/rossoctl/context-service).
 
 ```sh
