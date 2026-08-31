@@ -8,6 +8,11 @@ package buildinfo
 
 import "fmt"
 
+// Version is the CLI's build version, set at build time via -ldflags (see the
+// Makefile). It lives here, rather than in cmd, so that non-Cobra packages
+// such as internal/serve can report it without importing cmd.
+var Version = "dev"
+
 // Info describes how the binary was built.
 type Info struct {
 	Version string

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/rossoctl-cli/internal/buildinfo"
 )
 
 // testNamespaces are the namespaces newTestServer serves, distinct from the
@@ -60,12 +62,15 @@ func TestAuthConfigReportsDisabled(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := map[string]any{"enabled": false}
+	want := map[string]any{"enabled": false, "version": buildinfo.Version}
 	if len(got) != len(want) {
 		t.Fatalf("body = %v, want exactly %v", got, want)
 	}
 	if got["enabled"] != false {
 		t.Errorf("enabled = %v, want false", got["enabled"])
+	}
+	if got["version"] != buildinfo.Version {
+		t.Errorf("version = %v, want %v", got["version"], buildinfo.Version)
 	}
 }
 

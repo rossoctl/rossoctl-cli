@@ -1,13 +1,14 @@
-BINARY   := rossoctl
-PKG      := github.com/rossoctl/rossoctl-cli
-CMD_PKG  := $(PKG)/cmd
+BINARY       := rossoctl
+PKG          := github.com/rossoctl/rossoctl-cli
+CMD_PKG      := $(PKG)/cmd
+BUILDINFO_PKG := $(PKG)/internal/buildinfo
 
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS  := -s -w \
-	-X '$(CMD_PKG).version=$(VERSION)' \
+	-X '$(BUILDINFO_PKG).Version=$(VERSION)' \
 	-X '$(CMD_PKG).commit=$(COMMIT)' \
 	-X '$(CMD_PKG).date=$(DATE)'
 

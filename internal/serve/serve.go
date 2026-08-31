@@ -55,6 +55,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rossoctl/rossoctl-cli/internal/agentapi"
+	"github.com/rossoctl/rossoctl-cli/internal/buildinfo"
 	"github.com/rossoctl/rossoctl-cli/internal/instances"
 )
 
@@ -210,6 +211,7 @@ func HealthRoutes() []Route { return append([]Route(nil), healthRoutes...) }
 // fields are nullable and omitted while auth is disabled.
 type AuthConfig struct {
 	Enabled     bool    `json:"enabled"`
+	Version     *string `json:"version,omitempty"`
 	KeycloakURL *string `json:"keycloak_url,omitempty"`
 	Realm       *string `json:"realm,omitempty"`
 	ClientID    *string `json:"client_id,omitempty"`
@@ -488,7 +490,8 @@ func readyRoute(opts) http.HandlerFunc {
 // answering "disabled" lets it proceed straight to the API.
 func authConfigRoute(opts) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, AuthConfig{Enabled: false})
+		version := buildinfo.Version
+		writeJSON(w, http.StatusOK, AuthConfig{Enabled: false, Version: &version})
 	}
 }
 
