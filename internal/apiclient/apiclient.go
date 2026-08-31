@@ -100,6 +100,7 @@ func (e *StatusError) Error() string {
 // is distinguishable from "empty string" when rendering.
 type AuthConfig struct {
 	Enabled     bool    `json:"enabled"`
+	Version     *string `json:"version"`
 	KeycloakURL *string `json:"keycloak_url"`
 	Realm       *string `json:"realm"`
 	ClientID    *string `json:"client_id"`

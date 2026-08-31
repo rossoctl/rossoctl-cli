@@ -22,11 +22,12 @@ import (
 	"github.com/rossoctl/rossoctl-cli/internal/rossoctlclient"
 )
 
-// These are set at build time via -ldflags. See the Makefile.
+// commit and date are set at build time via -ldflags. See the Makefile.
+// The version itself lives in buildinfo.Version, so non-Cobra packages can
+// report it too.
 var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
+	commit = "none"
+	date   = "unknown"
 )
 
 // defaultServer is the API endpoint used when --server is not supplied.
