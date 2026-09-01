@@ -189,6 +189,51 @@ func newContextsDeleteCmd() *cobra.Command {
 	}
 }
 
+func newContextStorageClassesCmd() *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:     "storage-classes",
+		Aliases: []string{"sc"},
+		Short:   "List storage classes available for context resources",
+		Long: `List the storage classes that can be selected when creating context resources.
+
+This command obtains a constrained view through the Rosso API and does not
+require direct Kubernetes access. Use a returned name with --storage-class.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newClient(cmd)
+			if err != nil {
+				return err
+			}
+			result, err := client.ListContextStorageClasses(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				encoded, err := json.MarshalIndent(result.Items, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
+				return nil
+			}
+			if len(result.Items) == 0 {
+				cmd.Println("No storage classes found.")
+				return nil
+			}
+			writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
+			fmt.Fprintln(writer, "NAME\tDEFAULT\tPROVISIONER\tBINDING MODE\tEXPANSION")
+			for _, item := range result.Items {
+				fmt.Fprintf(writer, "%s\t%t\t%s\t%s\t%t\n", item.Name, item.Default,
+					item.Provisioner, item.VolumeBindingMode, item.AllowVolumeExpansion)
+			}
+			return writer.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "print JSON")
+	return cmd
+}
+
 func printContextResource(cmd *cobra.Command, value *apiclient.ContextResource, jsonOutput bool) error {
 	if jsonOutput {
 		encoded, err := json.MarshalIndent(value, "", "  ")
@@ -234,6 +279,6 @@ The current backend is PVC-backed storage mounted into StatefulSet or Sandbox ag
 Learn more:
 https://github.com/rossoctl/rossoctl/blob/main/docs/concepts/context-service.md`
 	contextsCmd.PersistentFlags().StringVar(&contextsNamespace, "namespace", "", "namespace (overrides current context)")
-	contextsCmd.AddCommand(newContextsCreateCmd(), newContextsListCmd(), newContextsGetCmd(), newContextsDeleteCmd())
+	contextsCmd.AddCommand(newContextsCreateCmd(), newContextsListCmd(), newContextsGetCmd(), newContextsDeleteCmd(), newContextStorageClassesCmd())
 	rootCmd.AddCommand(contextsCmd)
 }

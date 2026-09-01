@@ -167,6 +167,7 @@ var apiRoutes = []Route{
 	// unrelated reason, and reporting the two identically sends the user looking at
 	// their server's version instead of at their current context.
 	{http.MethodPost, "/contexts", unimplemented},
+	{http.MethodGet, "/context-storage-classes", unimplemented},
 	{http.MethodGet, "/contexts/{namespace}", unimplemented},
 	{http.MethodDelete, "/contexts/{namespace}/{name}", unimplemented},
 	{http.MethodGet, "/contexts/{namespace}/{name}", unimplemented},

@@ -703,6 +703,29 @@ type ContextListResponse struct {
 	Items []ContextResource `json:"items"`
 }
 
+// ContextStorageClass is the constrained storage choice view returned by Rosso.
+// It intentionally does not expose arbitrary Kubernetes StorageClass fields.
+type ContextStorageClass struct {
+	Name                 string `json:"name"`
+	Default              bool   `json:"default"`
+	Provisioner          string `json:"provisioner"`
+	VolumeBindingMode    string `json:"volumeBindingMode"`
+	ReclaimPolicy        string `json:"reclaimPolicy"`
+	AllowVolumeExpansion bool   `json:"allowVolumeExpansion"`
+}
+
+type ContextStorageClassListResponse struct {
+	Items []ContextStorageClass `json:"items"`
+}
+
+func (c *Client) ListContextStorageClasses(ctx context.Context) (*ContextStorageClassListResponse, error) {
+	var resp ContextStorageClassListResponse
+	if err := c.getJSON(ctx, "context-storage-classes", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *Client) CreateContext(ctx context.Context, req *CreateContextRequest) (*ContextResource, error) {
 	var resp ContextResource
 	if err := c.postJSON(ctx, "contexts", req, &resp); err != nil {

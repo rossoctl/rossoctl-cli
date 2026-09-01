@@ -87,6 +87,62 @@ func TestContextsList(t *testing.T) {
 	}
 }
 
+func TestContextStorageClasses(t *testing.T) {
+	isolateHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case "/api/v1/context-storage-classes":
+			_, _ = w.Write([]byte(`{"items":[{"name":"fast","default":true,"provisioner":"example.csi.io","volumeBindingMode":"WaitForFirstConsumer","reclaimPolicy":"Delete","allowVolumeExpansion":true}]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	setupImportContext(t, srv, "team1")
+
+	out, err := execute(t, "context", "storage-classes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"NAME", "DEFAULT", "PROVISIONER", "BINDING MODE", "EXPANSION", "fast", "true", "example.csi.io", "WaitForFirstConsumer"} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("output missing %q:\n%s", expected, out)
+		}
+	}
+}
+
+func TestContextStorageClassesJSON(t *testing.T) {
+	isolateHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces":
+			_, _ = w.Write([]byte(`{"namespaces":["team1"]}`))
+		case "/api/v1/context-storage-classes":
+			_, _ = w.Write([]byte(`{"items":[{"name":"fast","default":true,"provisioner":"example.csi.io","volumeBindingMode":"Immediate","reclaimPolicy":"Delete","allowVolumeExpansion":false}]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	setupImportContext(t, srv, "team1")
+
+	out, err := execute(t, "context", "storage-classes", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result []map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(result) != 1 || result[0]["name"] != "fast" || result[0]["default"] != true {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
 func TestContextGetShowsLabeledDetails(t *testing.T) {
 	isolateHome(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
