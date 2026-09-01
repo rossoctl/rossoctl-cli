@@ -29,43 +29,6 @@ rossoctl login
 rossoctl agents list
 ```
 
-## Agent Context Infrastructure
-
-Agent Context Infrastructure makes workspaces, memory, knowledge, artifacts, and
-related runtime state available to agents. It is distinct from the finite context
-window sent to an LLM.
-
-`rossoctl context` creates, lists, and attaches these resources through Rosso's
-optional Context Service integration. See Rosso's canonical
-[Agent Context Infrastructure documentation](https://github.com/rossoctl/rossoctl/blob/main/docs/concepts/context-service.md)
-for the resource model, storage behavior, and lifecycle. The component is maintained in the
-[context-service repository](https://github.com/rossoctl/context-service).
-
-```sh
-# Create and inspect a shared workspace.
-rossoctl context create research --shared --size 10Gi \
-    --storage-class ibm-scale-csi
-rossoctl context list
-
-# Mount it when importing an agent.
-rossoctl agents import --deployment-type sandbox \
-    --context research:/workspace \
-    from-image --name researcher --containerImage IMAGE
-```
-
-Context commands require a Rosso server containing the context resource API
-introduced by [rossoctl/rossoctl#2392](https://github.com/rossoctl/rossoctl/pull/2392).
-An older server returns an actionable compatibility error from `context list`.
-
-To try the commands from the latest source:
-
-```sh
-git clone https://github.com/rossoctl/rossoctl-cli.git
-cd rossoctl-cli
-make build
-./bin/rossoctl context --help
-```
-
 ## Running a command behind an AuthBridge pipeline
 
 Rossoctl can be used to test how an agent runs under an AuthBridge configuration on your laptop.  It provides an in-process implementation of AuthBridge.
@@ -75,7 +38,7 @@ Rossoctl can be used to test how an agent runs under an AuthBridge configuration
 # remote config is fetched to a temp file, which is removed on exit). Everything
 # after `--` is passed through to the command untouched, and rossoctl exits with
 # the command's exit status.
-rossoctl authbridge exec --config ./authbridge.yaml -- claude "explain this repo"
+rossoctl authbridge exec --config https://raw.githubusercontent.com/rossoctl/rossoctl-cli/refs/heads/main/examples/context-guru-tls-bridge.yaml -- claude "explain this repo"
 rossoctl authbridge exec --config https://example.com/authbridge.yaml -- ./script.sh --verbose
 ```
 
@@ -308,8 +271,17 @@ rossoctl otel send-mock-trace --url http://localhost:14318/v1/traces
 # List namespaces (GET <server>/namespaces)
 rossoctl namespaces list
 
-# Log the underlying REST requests to stderr
-rossoctl -v agents list
+# Create Agent Context Infrastructure.
+rossoctl context create research --shared --size 10Gi \
+    --storage-class ibm-scale-csi
+
+# List Agent Context Infrastructure.
+rossoctl context list
+
+# Mount Agent Context Infrastructure when importing an agent.
+rossoctl agents import --deployment-type sandbox \
+    --context research:/workspace \
+    from-image --name researcher --containerImage IMAGE
 ```
 
 ## Full docs
