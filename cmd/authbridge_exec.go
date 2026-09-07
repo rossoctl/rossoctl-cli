@@ -31,6 +31,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
 	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 
 	"github.com/rossoctl/rossoctl-cli/internal/instances"
 	"github.com/rossoctl/rossoctl-cli/internal/otelcollect"
@@ -878,10 +879,25 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 	// API's reads, so it is created once, before either. Session tracking
 	// defaults to on; an explicit `session.enabled: false` opts out.
 	var sessions *session.Store
+	var usageAgg *usage.Aggregator
 	if cfg.Session.SessionEnabled() {
 		ttl, maxEvents, maxSessions := sessionBounds(cfg, errOut)
 		sessions = session.New(ttl, maxEvents, maxSessions)
 		stops = append(stops, sessions.Close)
+
+		// Usage aggregation feeds GET /v1/usage. Registered as a store recorder
+		// so it sees every appended event, and deliberately independent of the
+		// store's own retention: session.max_events trims the per-session event
+		// list, but a bucket counter must keep counting after the events it
+		// counted have aged out, or a chart would appear to lose history that
+		// was visible a minute ago.
+		//
+		// Same session cap as the store, so the two agree on how many sessions
+		// are worth remembering. No Pricer is passed, so cost fields stay absent
+		// and the response reports priced:false.
+		usageAgg = usage.New(usage.WithMaxSessions(maxSessions))
+		sessions.AddRecorder(usageAgg)
+
 		if verbose {
 			fmt.Fprintf(errOut, "session tracking enabled (ttl %s, maxEvents %d, maxSessions %d)\n",
 				ttl, maxEvents, maxSessions)
@@ -936,7 +952,7 @@ func startAuthbridgeHost(cmd *cobra.Command, cfg *config.Config) (*authbridgeHos
 	}
 	stops = append(stops, func() { shutdownHTTP(reverseSrv, "reverse proxy", errOut) })
 
-	apiSrv, sessionAddr, err := startSessionAPI(cfg.Listener.SessionAPIAddr, inboundH, outboundH, sessions, serveErr, errOut)
+	apiSrv, sessionAddr, err := startSessionAPI(cfg.Listener.SessionAPIAddr, inboundH, outboundH, sessions, usageAgg, serveErr, errOut)
 	if err != nil {
 		return fail(err)
 	}
@@ -1280,6 +1296,7 @@ func startSessionAPI(
 	addr string,
 	inboundH, outboundH *pipeline.Holder,
 	sessions *session.Store,
+	usageAgg *usage.Aggregator,
 	serveErr chan<- error,
 	errOut io.Writer,
 ) (*sessionapi.Server, string, error) {
@@ -1291,9 +1308,14 @@ func startSessionAPI(
 	// configured. Reporting only outbound would understate a config with an
 	// inbound pipeline, which reads as "no inbound plugins" rather than "not
 	// shown".
+	// WithUsage is what registers GET /v1/usage; without it that route 404s.
+	// A nil aggregator is passed through rather than guarded against, which is
+	// how the endpoint stays absent when session tracking is off — the same
+	// condition that already returns early above.
 	srv := sessionapi.New(addr, sessions,
 		sessionapi.WithPipelines(inboundH, outboundH),
 		sessionapi.WithCatalog(sessionapi.PluginsCatalog),
+		sessionapi.WithUsage(usageAgg),
 	)
 
 	ln, err := net.Listen("tcp", addr)

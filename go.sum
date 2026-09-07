@@ -188,8 +188,8 @@ github.com/rogpeppe/go-internal v1.15.0 h1:D0RCU5rMAp+SpgkiNdrjfJ+LX4J1M32V2NeCY
 github.com/rogpeppe/go-internal v1.15.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
 github.com/rossoctl/context-guru v0.1.0 h1:u5KUm2cL4ZaV8FkgNHPCd1pnznswX3lA9i9XxTv17qQ=
 github.com/rossoctl/context-guru v0.1.0/go.mod h1:Uycopjjz08nDc2UsrnUxUUjqK0myN9VDnZBTaLnbfLs=
-github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260902150554-4ce9576d72cd h1:IaTnpTuKb9KdhER99xWypuuppBkN/1rh9+BkRIYREdU=
-github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260902150554-4ce9576d72cd/go.mod h1:JoPUaf09z7vddvWzgS3Ff2gIyIsrrKL2TOO2Zbh65PM=
+github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260907093639-fc3fbc2bbe3d h1:tZEXWUvfGIwrLDtUeNvfJcTL7294poeyhhwy4ISwnas=
+github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260907093639-fc3fbc2bbe3d/go.mod h1:RxseA3BY3SMCSS9vZM62/uM9U1q8PCmMXNLRtteR/MY=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/segmentio/asm v1.2.1 h1:DTNbBqs57ioxAD4PrArqftgypG4/qNpXoJx8TVXxPR0=
 github.com/segmentio/asm v1.2.1/go.mod h1:BqMnlJP91P8d+4ibuonYZw9mfnzI9HfxselHZr5aAcs=
