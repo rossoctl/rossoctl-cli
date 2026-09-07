@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.4.0
-	github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260902150554-4ce9576d72cd
+	github.com/rossoctl/cortex/authbridge/authlib v0.0.0-20260907093639-fc3fbc2bbe3d
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	gopkg.in/yaml.v3 v3.0.1
